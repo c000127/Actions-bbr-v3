@@ -29,6 +29,8 @@ jobs:
     env:
       ARCH: ${{ matrix.arch }}
       KERNEL_VERSION: ""
+      GOOGLE_BBR_REF: "v3"
+      GOOGLE_BBR_FETCH_DEPTH: "1"
     steps:
       - name: 获取内核版本
         id: get_kernel_version
@@ -72,16 +74,51 @@ jobs:
       - name: 添加 Google BBRv3
         working-directory: ./kernel/linux
         run: |
-          git remote add google-bbr https://github.com/google/bbr.git
-          git fetch google-bbr
-          git checkout google-bbr/v3
+          set -euo pipefail
+          git remote add google-bbr https://github.com/google/bbr.git || true
+          git fetch --depth=${{ env.GOOGLE_BBR_FETCH_DEPTH }} --filter=blob:none google-bbr ${{ env.GOOGLE_BBR_REF }}
+
+          echo "从 google-bbr/${{ env.GOOGLE_BBR_REF }} 同步 BBRv3 依赖文件快照..."
+          BBR_FILES=(
+            include/net/tcp.h
+            include/net/inet_connection_sock.h
+            include/linux/tcp.h
+            include/uapi/linux/tcp.h
+            include/uapi/linux/inet_diag.h
+            include/uapi/linux/rtnetlink.h
+            net/ipv4/Kconfig
+            net/ipv4/Makefile
+            net/ipv4/bpf_tcp_ca.c
+            net/ipv4/tcp_bbr.c
+            net/ipv4/tcp_bbr1.c
+            net/ipv4/tcp_cong.c
+            net/ipv4/tcp_input.c
+            net/ipv4/tcp_minisocks.c
+            net/ipv4/tcp_output.c
+            net/ipv4/tcp_rate.c
+            net/ipv4/tcp_timer.c
+            net/ipv4/tcp.c
+          )
+
+          for file in "${BBR_FILES[@]}"; do
+            if ! git cat-file -e "google-bbr/${{ env.GOOGLE_BBR_REF }}:$file" 2>/dev/null; then
+              echo "Google BBR 引用点缺少依赖文件: $file"
+              exit 1
+            fi
+          done
+
+          for file in "${BBR_FILES[@]}"; do
+            mkdir -p "$(dirname "$file")"
+            git show "google-bbr/${{ env.GOOGLE_BBR_REF }}:$file" > "$file"
+          done
+
+          grep -q "BBR" net/ipv4/tcp_bbr.c
 
       - name: 编译声明
         working-directory: ./kernel/linux
         run: |
-          grep -v "MODULE_DESCRIPTION" net/ipv4/tcp_bbr.c > net/ipv4/tcp_bbr.c.tmp
-          mv net/ipv4/tcp_bbr.c.tmp net/ipv4/tcp_bbr.c
-          
+          set -euo pipefail
+          sed -i '/^MODULE_DESCRIPTION(".*BBR.*"/d' net/ipv4/tcp_bbr.c
           echo 'MODULE_DESCRIPTION("TCP BBR v3 (Bottleneck Bandwidth and RTT) - Compiled & Optimized by Joey");' >> net/ipv4/tcp_bbr.c
           
           tail -n 5 net/ipv4/tcp_bbr.c
