@@ -1,4 +1,57 @@
-# ✨BBR 管理脚本✨  
+# ✨BBR 管理脚本✨ | BBR Management Script
+
+> **[English](#english) | [中文](#中文)**
+
+---
+
+<a id="english"></a>
+
+## English
+
+A simple, efficient and feature-rich BBR management script designed for Debian/Ubuntu servers.
+
+Whether you want to install the latest **BBR v3** kernel with one click, or flexibly switch between different network acceleration schemes, this script handles it all.
+
+### Target Environment
+
+| Item | Requirement |
+| :--- | :--- |
+| **Architecture** | `x86_64` / `aarch64` |
+| **OS** | Debian 11+ / Ubuntu 20.04+ |
+| **Target** | **Cloud VPS / Dedicated Server** |
+| **Bootloader** | Standard `GRUB` bootloader |
+
+> ⚠️ **Important:** This script is **not intended for** most SBCs (e.g., Raspberry Pi, NanoPi) which typically use U-Boot and will fail.
+
+### Features
+
+- 👑 One-click install BBR v3 kernel (latest mainline or stable)
+- 🍰 Switch acceleration mode (BBR+FQ, BBR+CAKE, etc.)
+- ⚙️ Enable/disable BBR acceleration
+- 🗑️ Uninstall custom kernels
+- 👀 Check current TCP congestion & qdisc settings
+
+### Quick Start
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/heads/main/install.sh)
+```
+
+### Kernel Configuration Highlights
+
+| Setting | Value | Rationale |
+|---|---|---|
+| Congestion Control | BBR v3 (built-in) | Best-in-class congestion control |
+| Default Qdisc | fq | Optimal pairing with BBR |
+| Timer Frequency | 1000 HZ | Better latency for network workloads |
+| Preemption | Voluntary | Good balance for server use |
+| BPF/eBPF | Enabled | Modern networking & observability |
+
+---
+
+<a id="中文"></a>
+
+## 中文
 
 一个为 Debian/Ubuntu 用户设计的，简单、高效且功能丰富的 BBR 管理脚本。
 
@@ -15,7 +68,7 @@
 | 项目 | 要求 |
 | :--- | :--- |
 | **支持架构** | `x86_64` / `aarch64` |
-| **支持系统** | Debian 10+ / Ubuntu 18.04+ |
+| **支持系统** | Debian 11+ / Ubuntu 20.04+ |
 | **目标设备** | **云服务器 (VPS/Cloud Server)** 或 **独立服务器** |
 | **引导方式** | 使用标准 `GRUB` 引导加载程序 |
 
@@ -41,7 +94,7 @@
 
 1. **一键运行**  
    ```bash
-   bash <(curl -l -s https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/heads/main/install.sh)
+   bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/heads/main/install.sh)
    ```
 
 ---
@@ -52,13 +105,14 @@
 
 ```bash
 ╭( ･ㅂ･)و ✧ 你可以选择以下操作哦：
-  1. 🛠️  安装 BBR v3
-  2. 🔍 检查是否为 BBR v3
-  3. ⚡ 使用 BBR + FQ 加速
-  4. ⚡ 使用 BBR + FQ_PIE 加速
-  5. ⚡ 使用 BBR + CAKE 加速
-  6. 🔧 开启或关闭 BBR
-  7. 🗑️  卸载
+  1. � 安装或更新 BBR v3 (最新版)
+  2. 📚 指定版本安装
+  3. 🔍 检查 BBR v3 状态
+  4. ⚡ 启用 BBR + FQ
+  5. ⚡ 启用 BBR + FQ_CODEL
+  6. ⚡ 启用 BBR + FQ_PIE
+  7. ⚡ 启用 BBR + CAKE
+  8. 🗑️  卸载 BBR 内核
 ```
 
 > **小提示：** 如果选错了也没关系，脚本会乖乖告诉你该怎么办！  
@@ -68,13 +122,16 @@
 ### 🌟 常见问题  
 
 **Q: 为什么下载失败啦？**  
-A: 有可能是 GitHub 链接过期了，来群里吐槽一下吧！  
+A: 有可能是 GitHub API 速率限制或者链接过期了，稍后重试或者来群里反馈！  
 
 **Q: 我不是 BBR 专家，不知道选哪个加速方案？**  
-A: 放心，BBR + FQ 是最常见的方案，适用于大多数场景～  
+A: 放心，BBR + FQ 是最常见的方案，适用于大多数场景（运行选项 4 即可）～  
 
 **Q: 如果不小心把系统搞崩了怎么办？**  
 A: 别慌！记得备份你的内核，或者到 [Joey's Blog](https://joeyblog.net) 查看修复教程。
+
+**Q: arm64 架构的内核包在哪里？**  
+A: arm64 构建需要在 GitHub Actions 的 `build.yml` 中取消 arm64 矩阵的注释以启用。启用后会自动使用 `ubuntu-24.04-arm` runner 进行原生编译。
 
 ---
 
