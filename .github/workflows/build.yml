@@ -57,9 +57,17 @@ jobs:
       - name: 下载内核源代码
         working-directory: ./kernel
         run: |
-          branch=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
-          git clone --depth=1 --branch linux-$branch.y \
-            https://github.com/gregkh/linux.git linux
+          # 逻辑判断：RC 版本用 Tag 从 Torvalds 库下，正式版从 Greg 库下
+          if [[ "${{ env.KERNEL_VERSION }}" == *"-rc"* ]]; then
+            echo "检测到 Mainline/RC 版本，从 Torvalds 仓库克隆 Tag..."
+            git clone --depth=1 --branch v${{ env.KERNEL_VERSION }} \
+              https://github.com/torvalds/linux.git linux
+          else
+            echo "检测到 Stable 版本，从 Greg 仓库克隆分支..."
+            branch=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
+            git clone --depth=1 --branch linux-$branch.y \
+              https://github.com/gregkh/linux.git linux
+          fi
 
       - name: 添加 Google BBRv3
         working-directory: ./kernel/linux
@@ -81,7 +89,16 @@ jobs:
       - name: 更新 Makefile 中的版本号
         working-directory: ./kernel/linux
         run: |
-          IFS='.' read -r v p s <<< "${{ env.KERNEL_VERSION }}"
+          # IFS='.' read -r v p s <<< "${{ env.KERNEL_VERSION }}"
+          # sed -i "s/^VERSION *=.*/VERSION = $v/" Makefile
+          # sed -i "s/^PATCHLEVEL *=.*/PATCHLEVEL = $p/" Makefile
+          # sed -i "s/^SUBLEVEL *=.*/SUBLEVEL = $s/" Makefile
+
+          # 增加容错处理，防止 RC 版本导致变量为空
+          v=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f1)
+          p=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f2 | cut -d- -f1)
+          s=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f3 || echo "0")
+          
           sed -i "s/^VERSION *=.*/VERSION = $v/" Makefile
           sed -i "s/^PATCHLEVEL *=.*/PATCHLEVEL = $p/" Makefile
           sed -i "s/^SUBLEVEL *=.*/SUBLEVEL = $s/" Makefile
