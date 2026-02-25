@@ -1,4 +1,5 @@
 #!/bin/bash
+set -uo pipefail
 
 # 限制脚本仅支持基于 Debian/Ubuntu 的系统
 if ! command -v apt-get &> /dev/null; then
@@ -6,12 +7,27 @@ if ! command -v apt-get &> /dev/null; then
     exit 1
 fi
 
-# 检查并安装必要的依赖
-REQUIRED_CMDS=("curl" "wget" "dpkg" "awk" "sed" "sysctl" "jq")
-for cmd in "${REQUIRED_CMDS[@]}"; do
-    if ! command -v $cmd &> /dev/null; then
-        echo -e "\033[33m缺少依赖：$cmd，正在安装...\033[0m"
-        sudo apt-get update && sudo apt-get install -y $cmd > /dev/null 2>&1
+# 检查 root 权限
+if [[ $EUID -ne 0 ]]; then
+    if ! sudo -n true 2>/dev/null; then
+        echo -e "\033[33m此脚本需要 root 权限，请输入密码以继续...\033[0m"
+        sudo true || { echo -e "\033[31m无法获取 root 权限，退出。\033[0m"; exit 1; }
+    fi
+fi
+
+# 检查并安装必要的依赖（仅检查 Debian 非必备包）
+# dpkg, awk, sed, sysctl 属于 Debian 必备包（dpkg, mawk, sed, procps），无需检查
+declare -A CMD_PKG_MAP=(
+    ["curl"]="curl"
+    ["wget"]="wget"
+    ["jq"]="jq"
+)
+apt_updated=false
+for cmd in "${!CMD_PKG_MAP[@]}"; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo -e "\033[33m缺少依赖：$cmd，正在安装 ${CMD_PKG_MAP[$cmd]}...\033[0m"
+        if ! $apt_updated; then sudo apt-get update > /dev/null 2>&1; apt_updated=true; fi
+        sudo apt-get install -y "${CMD_PKG_MAP[$cmd]}" > /dev/null 2>&1
     fi
 done
 
@@ -26,10 +42,27 @@ fi
 CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
 CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
 
+# 内核品牌标识（用于匹配已安装的内核包）
+KERNEL_BRAND="c000127-bbrv3"
+
 # sysctl 配置文件路径
-SYSCTL_CONF="/etc/sysctl.d/99-c000127.conf"
+SYSCTL_CONF="/etc/sysctl.d/99-${KERNEL_BRAND}.conf"
 # 模块自动加载配置文件路径
-MODULES_CONF="/etc/modules-load.d/c000127-qdisc.conf"
+MODULES_CONF="/etc/modules-load.d/${KERNEL_BRAND}-qdisc.conf"
+
+# 迁移旧版配置文件（从 c000127 → c000127-bbrv3）
+OLD_SYSCTL_CONF="/etc/sysctl.d/99-c000127.conf"
+OLD_MODULES_CONF="/etc/modules-load.d/c000127-qdisc.conf"
+if [[ -f "$OLD_SYSCTL_CONF" && "$OLD_SYSCTL_CONF" != "$SYSCTL_CONF" ]]; then
+    sudo mv "$OLD_SYSCTL_CONF" "$SYSCTL_CONF" 2>/dev/null
+fi
+if [[ -f "$OLD_MODULES_CONF" && "$OLD_MODULES_CONF" != "$MODULES_CONF" ]]; then
+    sudo mv "$OLD_MODULES_CONF" "$MODULES_CONF" 2>/dev/null
+fi
+
+# 创建安全的下载目录
+DOWNLOAD_DIR=$(mktemp -d)
+trap "rm -rf '$DOWNLOAD_DIR'" EXIT
 
 # 函数：清理 sysctl.d 中的旧配置
 clean_sysctl_conf() {
@@ -115,9 +148,9 @@ ask_to_save() {
     fi
 }
 
-# 函数：获取已安装的 c000127 内核版本
+# 函数：获取已安装的内核版本
 get_installed_version() {
-    dpkg -l | grep "linux-image" | grep "c000127" | awk '{print $2}' | sed 's/linux-image-//' | head -n 1
+    dpkg -l | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | sed 's/linux-image-//' | head -n 1
 }
 
 # 函数：智能更新引导加载程序
@@ -142,21 +175,25 @@ update_bootloader() {
 
 # 函数：安全地安装下载的包
 install_packages() {
-    if ! ls /tmp/linux-*.deb &> /dev/null; then
-        echo -e "\033[31m错误：未在 /tmp 目录下找到内核文件，安装中止。\033[0m"
+    if ! ls "$DOWNLOAD_DIR"/linux-*.deb &> /dev/null; then
+        echo -e "\033[31m错误：未在下载目录下找到内核文件，安装中止。\033[0m"
         return 1
     fi
     
     echo -e "\033[36m开始卸载旧版内核... \033[0m"
-    INSTALLED_PACKAGES=$(dpkg -l | grep "c000127" | awk '{print $2}' | tr '\n' ' ')
+    INSTALLED_PACKAGES=$(dpkg -l | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
     if [[ -n "$INSTALLED_PACKAGES" ]]; then
-        sudo apt-get remove --purge $INSTALLED_PACKAGES -y > /dev/null 2>&1
+        sudo apt-get remove --purge -y -- $INSTALLED_PACKAGES > /dev/null 2>&1
     fi
 
     echo -e "\033[36m开始安装新内核... \033[0m"
-    if sudo dpkg -i /tmp/linux-*.deb && update_bootloader; then
-        echo -e "\033[1;32m内核安装并配置完成！\033[0m"
-        echo -n -e "\033[33m需要重启系统来加载新内核。是否立即重启？ (y/n): \033[0m"
+    if sudo dpkg -i "$DOWNLOAD_DIR"/linux-*.deb && update_bootloader; then
+        echo -e "\033[1;32m━━━━━━━━ 安装完成 ━━━━━━━━\033[0m"
+        NEW_KERNEL_VER=$(dpkg -l | grep linux-image | grep "$KERNEL_BRAND" | awk '{print $3}' | head -n 1)
+        echo -e "\033[36m  内核版本：\033[1;32m${NEW_KERNEL_VER:-"未知"}\033[0m"
+        echo -e "\033[36m  当前运行：\033[1;32m$(uname -r)\033[0m"
+        echo -e "\033[33m  ⚠ 需要重启后生效\033[0m"
+        echo -n -e "\033[33m是否立即重启？ (y/n): \033[0m"
         read -r REBOOT_NOW
         if [[ "$REBOOT_NOW" == "y" || "$REBOOT_NOW" == "Y" ]]; then
             echo -e "\033[36m系统即将重启...\033[0m"
@@ -173,8 +210,8 @@ install_packages() {
 install_latest_version() {
     echo -e "\033[36m正在从 GitHub 获取最新版本信息...\033[0m"
     BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases"
-    RELEASE_DATA=$(curl -sL "$BASE_URL")
-    if [[ -z "$RELEASE_DATA" ]]; then
+    RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
+    if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
         echo -e "\033[31m从 GitHub 获取版本信息失败。请检查网络连接或 API 状态。\033[0m"
         return 1
     fi
@@ -206,11 +243,11 @@ install_latest_version() {
     echo -e "\033[33m发现新版本或未安装内核，准备下载...\033[0m"
     ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$LATEST_TAG_NAME" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
     
-    rm -f /tmp/linux-*.deb
+    rm -f "$DOWNLOAD_DIR"/linux-*.deb
 
     for URL in $ASSET_URLS; do
         echo -e "\033[36m正在下载文件：$URL\033[0m"
-        wget -q --show-progress "$URL" -P /tmp/ || { echo -e "\033[31m下载失败：$URL\033[0m"; return 1; }
+        wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$URL\033[0m"; return 1; }
     done
     
     install_packages
@@ -219,8 +256,8 @@ install_latest_version() {
 # 函数：安装指定版本
 install_specific_version() {
     BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases"
-    RELEASE_DATA=$(curl -s "$BASE_URL")
-    if [[ -z "$RELEASE_DATA" ]]; then
+    RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
+    if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
         echo -e "\033[31m从 GitHub 获取版本信息失败。请检查网络连接或 API 状态。\033[0m"
         return 1
     fi
@@ -257,11 +294,11 @@ install_specific_version() {
 
     ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$SELECTED_TAG" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
     
-    rm -f /tmp/linux-*.deb
+    rm -f "$DOWNLOAD_DIR"/linux-*.deb
     
     for URL in $ASSET_URLS; do
         echo -e "\033[36m下载中：$URL\033[0m"
-        wget -q --show-progress "$URL" -P /tmp/ || { echo -e "\033[31m下载失败：$URL\033[0m"; return 1; }
+        wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$URL\033[0m"; return 1; }
     done
 
     install_packages
@@ -311,7 +348,7 @@ case "$ACTION" in
         BBR_MODULE_INFO=$(modinfo tcp_bbr 2>/dev/null)
         if [[ -z "$BBR_MODULE_INFO" ]]; then
             echo -e "\033[36m正在刷新模块依赖...\033[0m"
-            depmod -a
+            sudo depmod -a
             BBR_MODULE_INFO=$(modinfo tcp_bbr 2>/dev/null)
         fi
         if [[ -z "$BBR_MODULE_INFO" ]]; then
@@ -364,14 +401,14 @@ case "$ACTION" in
         ;;
     8)
         echo -e "\033[1;32mヽ(・∀・)ノ 您选择了卸载 BBR 内核！\033[0m"
-        PACKAGES_TO_REMOVE=$(dpkg -l | grep "c000127" | awk '{print $2}' | tr '\n' ' ')
+        PACKAGES_TO_REMOVE=$(dpkg -l | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
         if [[ -n "$PACKAGES_TO_REMOVE" ]]; then
             echo -e "\033[36m将要卸载以下内核包: \033[33m$PACKAGES_TO_REMOVE\033[0m"
-            sudo apt-get remove --purge $PACKAGES_TO_REMOVE -y
+            sudo apt-get remove --purge -y -- $PACKAGES_TO_REMOVE
             update_bootloader
             echo -e "\033[1;32m内核包已卸载。请记得重启系统。\033[0m"
         else
-            echo -e "\033[33m未找到由本脚本安装的 'c000127' 内核包。\033[0m"
+            echo -e "\033[33m未找到由本脚本安装的 '$KERNEL_BRAND' 内核包。\033[0m"
         fi
         ;;
     *)

@@ -30,18 +30,29 @@ jobs:
       ARCH: ${{ matrix.arch }}
       KERNEL_VERSION: ""
     steps:
-      - name: 获取内核版本
+      - name: �️ 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h /
+
+      - name: 📋 获取最新内核版本
         id: get_kernel_version
         run: |
-          version=$(curl -s https://www.kernel.org \
+          version=$(curl -sL --retry 3 https://www.kernel.org \
             | grep -A1 -m1 "mainline:" \
             | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?')
+          if [[ -z "$version" ]]; then
+            echo "::error::无法从 kernel.org 获取内核版本号"
+            exit 1
+          fi
+          echo "获取到内核版本: $version"
           echo "KERNEL_VERSION=$version" >> $GITHUB_ENV
 
-      - name: 检出代码
+      - name: 📥 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 安装依赖项
+      - name: 🔧 安装构建依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -51,12 +62,13 @@ jobs:
             dpkg-dev fakeroot kmod cpio dwarves \
             lz4 zstd xz-utils curl jq patch
 
-      - name: 创建源码目录
+      - name: 📁 创建源码目录
         run: mkdir -p ./kernel/linux
 
-      - name: 下载内核源代码
+      - name: ⬇️ 下载内核源代码
         working-directory: ./kernel
         run: |
+          set -euo pipefail
           # 逻辑判断：RC 版本用 Tag 从 Torvalds 库下，正式版从 Greg 库下
           if [[ "${{ env.KERNEL_VERSION }}" == *"-rc"* ]]; then
             echo "检测到 Mainline/RC 版本，从 Torvalds 仓库克隆 Tag..."
@@ -65,11 +77,12 @@ jobs:
           else
             echo "检测到 Stable 版本，从 Greg 仓库克隆分支..."
             branch=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
-            git clone --depth=1 --branch linux-$branch.y \
+            git clone --depth=1 --branch linux-${branch}.y \
               https://github.com/gregkh/linux.git linux
           fi
+          echo "内核源码下载完成，目录大小: $(du -sh linux | cut -f1)"
 
-      - name: 应用 CachyOS BBRv3 补丁
+      - name: 🩹 注入 BBRv3 补丁
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
@@ -80,22 +93,27 @@ jobs:
           fi
 
           patch_url="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}/0002-bbr3.patch"
+          echo "检查 BBRv3 补丁是否可用: $patch_url"
+          if ! curl -sfL --head "$patch_url" >/dev/null 2>&1; then
+            echo "::error::BBRv3 补丁尚未发布于内核版本 $kernel_series"
+            exit 1
+          fi
           echo "下载并应用 BBRv3 补丁: $patch_url"
           curl -fL --retry 3 --retry-delay 2 "$patch_url" -o /tmp/0002-bbr3.patch
           patch --forward --batch -p1 < /tmp/0002-bbr3.patch
 
           grep -q "BBR" net/ipv4/tcp_bbr.c
 
-      - name: 编译声明
+      - name: ✏️ 编译声明
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
           sed -i '/^MODULE_DESCRIPTION(".*BBR.*"/d' net/ipv4/tcp_bbr.c
-          echo 'MODULE_DESCRIPTION("TCP BBR v3 (Bottleneck Bandwidth and RTT) - Compiled & Optimized by Joey");' >> net/ipv4/tcp_bbr.c
+          echo "MODULE_DESCRIPTION(\"TCP BBR v3 — Linux ${{ env.KERNEL_VERSION }} — Built by C000127\");" >> net/ipv4/tcp_bbr.c
           
           tail -n 5 net/ipv4/tcp_bbr.c
 
-      - name: 更新 Makefile 中的版本号
+      - name: 🔢 更新 Makefile 版本号
         working-directory: ./kernel/linux
         run: |
           # IFS='.' read -r v p s <<< "${{ env.KERNEL_VERSION }}"
@@ -106,19 +124,22 @@ jobs:
           # 增加容错处理，防止 RC 版本导致变量为空
           v=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f1)
           p=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f2 | cut -d- -f1)
-          s=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f3 || echo "0")
+          s=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f3 | cut -d- -f1)
+          # RC 版本或两段版本号（如 7.0-rc1）会导致 SUBLEVEL 为空，默认置 0
+          s=${s:-0}
           
+          echo "Makefile 版本: VERSION=$v PATCHLEVEL=$p SUBLEVEL=$s"
           sed -i "s/^VERSION *=.*/VERSION = $v/" Makefile
           sed -i "s/^PATCHLEVEL *=.*/PATCHLEVEL = $p/" Makefile
           sed -i "s/^SUBLEVEL *=.*/SUBLEVEL = $s/" Makefile
 
-      - name: 准备 .config 并禁用证书检查
+      - name: ⚙️ 准备内核配置
         working-directory: ./kernel/linux
         run: |
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            curl -sSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/main/arm64.config > .config
+            cp ${{ github.workspace }}/arm64.config .config
           else
-            curl -sSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/main/x86-64.config > .config
+            cp ${{ github.workspace }}/x86-64.config .config
           fi
 
           scripts/config --disable SYSTEM_TRUSTED_KEYS
@@ -130,12 +151,11 @@ jobs:
             make olddefconfig
           fi
 
-      - name: 构建内核 Debian 包
+      - name: 🏗️ 构建内核 Debian 包
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
           native_arch=$(dpkg --print-architecture)
-          sudo apt-get update
           sudo apt-get install -y "libdw-dev:${native_arch}" || sudo apt-get install -y libdw-dev
           dpkg-query -W -f='${Package}:${Architecture} ${Status}\n' "libdw-dev:${native_arch}" || true
 
@@ -145,21 +165,45 @@ jobs:
             make bindeb-pkg -j$(nproc) LOCALVERSION=-c000127-bbrv3
           fi
 
-      - name: 上传配置文件
+      - name: 📤 上传配置文件
         uses: actions/upload-artifact@v4
         with:
           name: config-${{ matrix.arch }}
           path: ./kernel/linux/.config
 
-      - name: 上传 deb 包
+      - name: 📤 上传 Deb 包
         uses: actions/upload-artifact@v4
         with:
           name: deb-${{ matrix.arch }}
           path: ./kernel/linux-*.deb
 
-      - name: 发布到 GitHub Release
+      - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}
           files: ./kernel/linux-*.deb
-          body: "带有 BBRv3 的最新内核，适用于 ${{ matrix.arch }} 架构。"
+          body: |
+            ## 🚀 Linux ${{ env.KERNEL_VERSION }} with BBRv3 — ${{ matrix.arch }}
+
+            | 项目 | 值 |
+            |---|---|
+            | 内核版本 | ${{ env.KERNEL_VERSION }} |
+            | 架构 | ${{ matrix.arch }} |
+            | 拥塞控制 | BBRv3 (built-in) |
+            | 默认 Qdisc | fq |
+            | 定时器频率 | 1000 HZ |
+            | 抢占模型 | Voluntary |
+
+            ### 📦 安装方式
+            ```bash
+            bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/main/install.sh)
+            ```
+
+            或手动下载 .deb 文件后执行：
+            ```bash
+            sudo dpkg -i linux-*.deb && sudo update-grub && sudo reboot
+            ```
+
+            ### ⚠️ 注意
+            - 仅适用于 Debian 11+ / Ubuntu 20.04+ 系统
+            - 安装后需重启生效
