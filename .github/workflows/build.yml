@@ -48,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             git build-essential \
-            libncurses-dev libssl-dev libelf-dev \
+            libncurses-dev libssl-dev libelf-dev libdw-dev \
             bison bc flex rsync debhelper \
             dpkg-dev fakeroot kmod cpio dwarves \
             lz4 zstd xz-utils curl jq
@@ -161,6 +161,12 @@ jobs:
       - name: 构建内核 Debian 包
         working-directory: ./kernel/linux
         run: |
+          set -euo pipefail
+          native_arch=$(dpkg --print-architecture)
+          sudo apt-get update
+          sudo apt-get install -y "libdw-dev:${native_arch}" || sudo apt-get install -y libdw-dev
+          dpkg-query -W -f='${Package}:${Architecture} ${Status}\n' "libdw-dev:${native_arch}" || true
+
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) LOCALVERSION=-c000127-bbrv3
           else
