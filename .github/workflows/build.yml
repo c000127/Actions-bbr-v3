@@ -29,8 +29,6 @@ jobs:
     env:
       ARCH: ${{ matrix.arch }}
       KERNEL_VERSION: ""
-      GOOGLE_BBR_REF: "v3"
-      GOOGLE_BBR_FETCH_DEPTH: "1"
     steps:
       - name: 获取内核版本
         id: get_kernel_version
@@ -51,7 +49,7 @@ jobs:
             libncurses-dev libssl-dev libelf-dev libdw-dev \
             bison bc flex rsync debhelper \
             dpkg-dev fakeroot kmod cpio dwarves \
-            lz4 zstd xz-utils curl jq
+            lz4 zstd xz-utils curl jq patch
 
       - name: 创建源码目录
         run: mkdir -p ./kernel/linux
@@ -71,31 +69,20 @@ jobs:
               https://github.com/gregkh/linux.git linux
           fi
 
-      - name: 添加 Google BBRv3
+      - name: 应用 CachyOS BBRv3 补丁
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
-          git remote add google-bbr https://github.com/google/bbr.git || true
-          git fetch --depth=${{ env.GOOGLE_BBR_FETCH_DEPTH }} --filter=blob:none google-bbr ${{ env.GOOGLE_BBR_REF }}
+          kernel_series=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
+          if [ -z "$kernel_series" ]; then
+            echo "无法从 KERNEL_VERSION=${{ env.KERNEL_VERSION }} 解析内核主版本号"
+            exit 1
+          fi
 
-          echo "从 google-bbr/${{ env.GOOGLE_BBR_REF }} 同步 BBRv3 依赖文件快照..."
-          BBR_FILES=(
-            net/ipv4/tcp_bbr.c
-          )
-
-          echo "为保持与主线内核 ABI 兼容，采用最小覆盖：仅同步 net/ipv4/tcp_bbr.c。"
-
-          for file in "${BBR_FILES[@]}"; do
-            if ! git cat-file -e "google-bbr/${{ env.GOOGLE_BBR_REF }}:$file" 2>/dev/null; then
-              echo "Google BBR 引用点缺少依赖文件: $file"
-              exit 1
-            fi
-          done
-
-          for file in "${BBR_FILES[@]}"; do
-            mkdir -p "$(dirname "$file")"
-            git show "google-bbr/${{ env.GOOGLE_BBR_REF }}:$file" > "$file"
-          done
+          patch_url="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}/0002-bbr3.patch"
+          echo "下载并应用 BBRv3 补丁: $patch_url"
+          curl -fL --retry 3 --retry-delay 2 "$patch_url" -o /tmp/0002-bbr3.patch
+          patch --forward --batch -p1 < /tmp/0002-bbr3.patch
 
           grep -q "BBR" net/ipv4/tcp_bbr.c
 
@@ -175,4 +162,4 @@ jobs:
         with:
           tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}
           files: ./kernel/linux-*.deb
-          body: "带有 BBRv3 的最新内核，适用于 ${{ matrix.arch }} 架构。Compiled & Optimized by Joey."
+          body: "带有 BBRv3 的最新内核，适用于 ${{ matrix.arch }} 架构。"
