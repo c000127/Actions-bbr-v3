@@ -80,12 +80,6 @@ jobs:
 
           echo "从 google-bbr/${{ env.GOOGLE_BBR_REF }} 同步 BBRv3 依赖文件快照..."
           BBR_FILES=(
-            include/net/tcp.h
-            include/net/inet_connection_sock.h
-            include/linux/tcp.h
-            include/uapi/linux/tcp.h
-            include/uapi/linux/inet_diag.h
-            include/uapi/linux/rtnetlink.h
             net/ipv4/Kconfig
             net/ipv4/Makefile
             net/ipv4/bpf_tcp_ca.c
@@ -99,6 +93,8 @@ jobs:
             net/ipv4/tcp_timer.c
             net/ipv4/tcp.c
           )
+
+          echo "为保持与主线内核 ABI 兼容，默认不同步 include/* 头文件。"
 
           for file in "${BBR_FILES[@]}"; do
             if ! git cat-file -e "google-bbr/${{ env.GOOGLE_BBR_REF }}:$file" 2>/dev/null; then
