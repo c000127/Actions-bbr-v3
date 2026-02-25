@@ -34,7 +34,7 @@ jobs:
         id: get_kernel_version
         run: |
           version=$(curl -s https://www.kernel.org \
-            | grep -A1 -m1 "stable:" \
+            | grep -A1 -m1 "mainline:" \
             | grep -oP '\d+\.\d+\.\d+')
           echo "KERNEL_VERSION=$version" >> $GITHUB_ENV
 
