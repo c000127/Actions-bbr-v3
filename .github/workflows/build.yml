@@ -91,7 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           sed -i '/^MODULE_DESCRIPTION(".*BBR.*"/d' net/ipv4/tcp_bbr.c
-          echo 'MODULE_DESCRIPTION("TCP BBR v3 (Bottleneck Bandwidth and RTT) - Compiled & Optimized by Joey");' >> net/ipv4/tcp_bbr.c
+          echo 'MODULE_DESCRIPTION("TCP BBR v3 (Bottleneck Bandwidth and RTT) - Compiled & Optimized from CachyOS kernel patch");' >> net/ipv4/tcp_bbr.c
           
           tail -n 5 net/ipv4/tcp_bbr.c
 
