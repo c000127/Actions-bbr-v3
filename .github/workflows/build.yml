@@ -35,7 +35,7 @@ jobs:
         run: |
           version=$(curl -s https://www.kernel.org \
             | grep -A1 -m1 "mainline:" \
-            | grep -oP '\d+\.\d+\.\d+')
+            | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?'
           echo "KERNEL_VERSION=$version" >> $GITHUB_ENV
 
       - name: 检出代码
