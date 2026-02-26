@@ -3,6 +3,10 @@ name: 构建带有BBRv3的内核
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: write
+
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -67,6 +71,14 @@ jobs:
           ccache --max-size=2G
           echo "/usr/lib/ccache" >> $GITHUB_PATH
           echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
+
+      - name: � 恢复 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_VERSION }}
+          restore-keys: |
+            ccache-${{ matrix.arch }}-
 
       - name: 📁 创建源码目录
         run: mkdir -p ./kernel/linux
@@ -216,8 +228,22 @@ jobs:
           fi
 
           # 输出关键配置供验证
+          # 保存配置文件副本用于后续上传（bindeb-pkg 会改变目录结构）
+          cp .config ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
+
           echo "=== 关键配置验证 ==="
-          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_SOUND=|CONFIG_DRM=' .config || true
+          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_SOUND=|CONFIG_DRM=|CONFIG_HYPERV=|CONFIG_MICROCODE_AMD=|CONFIG_PAGE_POOL_STATS=|CONFIG_ZSWAP_DEFAULT_ON=' .config || true
+
+          echo "=== 检查 olddefconfig 是否产生了意外变更 ==="
+          UNEXPECTED=0
+          grep -q 'CONFIG_KERNEL_ZSTD=y' .config || { echo "::warning::CONFIG_KERNEL_ZSTD 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_NO_HZ_IDLE=y' .config || { echo "::warning::CONFIG_NO_HZ_IDLE 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_MICROCODE_AMD=y' .config || { echo "::warning::CONFIG_MICROCODE_AMD 未生效！"; UNEXPECTED=1; }
+          if [ $UNEXPECTED -eq 1 ]; then
+            echo "::warning::部分关键配置未生效，请检查基础配置文件是否需要更新"
+          fi
 
       - name: 🏗️ 构建内核 Debian 包
         working-directory: ./kernel/linux
@@ -242,7 +268,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: config-${{ matrix.arch }}
-          path: ./kernel/linux/.config
+          path: ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
       - name: 📤 上传 Deb 包
         uses: actions/upload-artifact@v4
