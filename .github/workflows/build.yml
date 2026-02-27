@@ -152,11 +152,6 @@ jobs:
       - name: 🔢 更新 Makefile 版本号
         working-directory: ./kernel/linux
         run: |
-          # IFS='.' read -r v p s <<< "${{ env.KERNEL_VERSION }}"
-          # sed -i "s/^VERSION *=.*/VERSION = $v/" Makefile
-          # sed -i "s/^PATCHLEVEL *=.*/PATCHLEVEL = $p/" Makefile
-          # sed -i "s/^SUBLEVEL *=.*/SUBLEVEL = $s/" Makefile
-
           # 增加容错处理，防止 RC 版本导致变量为空
           v=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f1)
           p=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f2 | cut -d- -f1)
@@ -207,7 +202,12 @@ jobs:
 
           # === 禁用 VPS 不需要的硬件驱动（减少编译时间约 40%） ===
           scripts/config --disable SOUND
-          scripts/config --disable DRM
+          # DRM: 保留核心框架（VPS 控制台依赖 BOCHS/QXL/VIRTIO_GPU），仅禁用物理显卡驱动
+          scripts/config --disable DRM_RADEON
+          scripts/config --disable DRM_AMDGPU
+          scripts/config --disable DRM_NOUVEAU
+          scripts/config --disable DRM_I915
+          scripts/config --disable DRM_GMA500
           scripts/config --disable WLAN
           scripts/config --disable WIRELESS
           scripts/config --disable CFG80211
@@ -221,8 +221,6 @@ jobs:
           scripts/config --disable STAGING
           scripts/config --disable COMEDI
           scripts/config --disable GREYBUS
-          scripts/config --disable FB
-          scripts/config --disable VGA_ARB
           scripts/config --disable PCMCIA
           scripts/config --disable NFC
           scripts/config --disable HAMRADIO
