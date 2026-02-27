@@ -9,6 +9,9 @@ permissions:
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # 内核分支选择：取消注释其中一行（mainline = 主线/RC，stable = 稳定版）
+  KERNEL_BRANCH: mainline
+  #KERNEL_BRANCH: stable
 
 jobs:
   build:
@@ -45,8 +48,9 @@ jobs:
       - name: 📋 获取最新内核版本
         id: get_kernel_version
         run: |
+          echo "选择的内核分支: ${{ env.KERNEL_BRANCH }}"
           version=$(curl -sL --retry 3 https://www.kernel.org \
-            | grep -A1 -m1 "mainline:" \
+            | grep -A1 -m1 "${{ env.KERNEL_BRANCH }}:" \
             | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?')
           if [[ -z "$version" ]]; then
             echo "::error::无法从 kernel.org 获取内核版本号"
