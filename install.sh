@@ -1,6 +1,21 @@
 #!/bin/bash
 set -uo pipefail
 
+# BBR v3 管理脚本 — c000127 fork
+# 原始项目：https://github.com/byJoey/Actions-bbr-v3
+#
+# 相较上游的主要改进：
+#   - set -uo pipefail + root 权限检查
+#   - 依赖检查优化（跳过系统内置包，单次 apt-get update）
+#   - 安全下载目录（mktemp -d + EXIT trap 自动清理）
+#   - API 调用增加重试、分页和 JSON 校验
+#   - 版本号规范化（支持 RC / 两段版本号）
+#   - 跳过 linux-libc-dev 下载（运行时不需要）
+#   - 配置文件命名迁移（自动从旧版迁移）
+#   - 版本列表标记已安装版本
+#   - 增强状态显示（运行内核、BBR 版本、算法+队列）
+#   - apt-get remove 安全选项终结符 (--)
+
 # 限制脚本仅支持基于 Debian/Ubuntu 的系统
 if ! command -v apt-get &> /dev/null; then
     echo -e "\033[31m此脚本仅支持基于 Debian/Ubuntu 的系统，请在支持 apt-get 的系统上运行！\033[0m"
@@ -359,7 +374,7 @@ else
 fi
 echo -e "\033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
 print_separator
-echo -e "\033[1;33m作者：Joey  |  博客：https://joeyblog.net  |  反馈群组：https://t.me/+ft-zI76oovgwNmRh\033[0m"
+echo -e "\033[1;33m作者：C000127  |  Fork of byJoey/Actions-bbr-v3"
 print_separator
 
 echo -e "\033[1;33m╭( ･ㅂ･)و ✧ 你可以选择以下操作哦：\033[0m"
