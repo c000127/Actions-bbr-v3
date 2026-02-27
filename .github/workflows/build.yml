@@ -277,17 +277,14 @@ jobs:
           BUILD_START=$(date +%s)
           # -pipe: 使用管道替代临时文件传递编译阶段数据
           # -j$(nproc): 充分利用所有 CPU 核心
-          # KDEB_COMPRESS=none: 跳过 .deb 内部压缩（GitHub Release 下载后本地安装）
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) \
               LOCALVERSION=-c000127-bbrv3 \
-              KCFLAGS="-pipe" \
-              KDEB_COMPRESS=none
+              KCFLAGS="-pipe"
           else
             make bindeb-pkg -j$(nproc) \
               LOCALVERSION=-c000127-bbrv3 \
-              KCFLAGS="-pipe" \
-              KDEB_COMPRESS=none
+              KCFLAGS="-pipe"
           fi
           BUILD_END=$(date +%s)
           echo "编译耗时: $(( (BUILD_END - BUILD_START) / 60 )) 分 $(( (BUILD_END - BUILD_START) % 60 )) 秒"
