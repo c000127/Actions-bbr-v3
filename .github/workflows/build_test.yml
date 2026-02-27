@@ -190,8 +190,9 @@ jobs:
           echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
           echo "/usr/lib/ccache" >> $GITHUB_PATH
           mkdir -p ${{ github.workspace }}/.ccache
-          # 增大缓存容量，覆盖完整内核编译产物
-          ccache --max-size=5G
+          # build_test 使用激进编译选项（x86-64-v3、mitigations off），
+          # 缓存容量适当增大以容纳不同配置的编译产物
+          ccache --max-size=8G
           # 按文件内容校验编译器（避免路径变化导致缓存失效）
           ccache --set-config=compiler_check=content
           # 启用压缩，节省缓存空间（level 1 几乎不影响速度）
@@ -199,18 +200,27 @@ jobs:
           ccache --set-config=compression_level=1
           # depend 模式：跳过预处理阶段直接使用依赖信息，大幅提升缓存命中
           ccache --set-config=depend_mode=true
-          # 宽松匹配：忽略 __FILE__、时间戳等宏差异
-          ccache --set-config=sloppiness=file_macro,locale,time_macros,pch_defines
+          # 宽松匹配：忽略 __FILE__、时间戳、include_file 等宏差异
+          # system_headers：缓存系统头文件的编译结果（内核编译大量引用）
+          ccache --set-config=sloppiness=file_macro,locale,time_macros,pch_defines,include_file_mtime,include_file_ctime,system_headers
+          # 直接存储编译结果到缓存（跳过临时文件，减少 I/O）
+          ccache --set-config=direct_mode=true
+          # 忽略 header 时间戳变化（GitHub Actions 每次 clone 时间戳都不同）
+          ccache --set-config=inode_cache=true
+          echo "ccache 配置完成:"
+          ccache -p | grep -E 'max_size|compression|depend_mode|sloppiness|direct_mode'
 
       - name: 📦 恢复 ccache 缓存
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
+          # beta- 前缀隔离 build_test 与 build.yml 的缓存
+          # 两者编译选项不同（x86-64-v3、mitigations off 等），不能共享
+          key: beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
           restore-keys: |
-            ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
-            ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
-            ccache-${{ matrix.arch }}-
+            beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
+            beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
+            beta-ccache-${{ matrix.arch }}-
 
       - name: ⬇️ 下载内核源代码
         run: |
