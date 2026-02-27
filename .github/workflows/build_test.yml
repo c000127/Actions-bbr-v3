@@ -243,53 +243,64 @@ jobs:
           fi
 
           CACHYOS_BASE="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}"
-          PATCHES_APPLIED=0
+          BBR_APPLIED=false
 
-          # === CachyOS 基础性能补丁集（best-effort，失败不阻塞构建）===
-          # 包含：EEVDF 调度器改进、AMD P-State 优化、内存管理增强等
-          # 注意：base-all 在 all/ 子目录，fixes 编号随版本变化需探测
-          declare -A PATCH_PATHS=(
-            ["0001-cachyos-base-all.patch"]="${CACHYOS_BASE}/all/0001-cachyos-base-all.patch"
-          )
-          # fixes 补丁编号不固定（6.x 是 0003，7.0 是 0004），逐个探测
-          FIXES_URL=""
-          for num in 0003 0004 0005; do
-            candidate="${CACHYOS_BASE}/${num}-fixes.patch"
-            if curl -sfL --head "$candidate" >/dev/null 2>&1; then
-              FIXES_URL="$candidate"
-              PATCH_PATHS["${num}-fixes.patch"]="$candidate"
-              break
-            fi
-          done
-
-          for patch_name in "${!PATCH_PATHS[@]}"; do
-            patch_url="${PATCH_PATHS[$patch_name]}"
-            echo "尝试下载 CachyOS 补丁: ${patch_name}"
-            echo "  URL: ${patch_url}"
-            if curl -sfL --head "$patch_url" >/dev/null 2>&1; then
-              curl -fL --retry 3 --retry-delay 2 "$patch_url" -o "/tmp/${patch_name}"
-              if patch --forward --batch -p1 < "/tmp/${patch_name}"; then
-                echo "✅ ${patch_name} 应用成功"
-                PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
-              else
-                echo "⚠️ ${patch_name} 应用失败（可能与当前内核版本冲突），跳过"
-              fi
+          # ================================================================
+          # 策略 1：尝试 base-all 全量补丁（已包含 BBRv3 + fixes + 性能优化）
+          # base-all 是 CachyOS 的一体化补丁，包含 EEVDF 调度器、AMD P-State、
+          # 内存管理、BBRv3、fixes 等全部改进。如果成功则无需单独打补丁。
+          # ================================================================
+          base_all_url="${CACHYOS_BASE}/all/0001-cachyos-base-all.patch"
+          echo "=== 策略 1：尝试 CachyOS base-all 全量补丁 ==="
+          echo "  URL: ${base_all_url}"
+          if curl -sfL --head "$base_all_url" >/dev/null 2>&1; then
+            curl -fL --retry 3 --retry-delay 2 "$base_all_url" -o /tmp/base-all.patch
+            if patch --forward --batch -p1 < /tmp/base-all.patch; then
+              echo "✅ base-all 全量补丁应用成功（包含 BBRv3 + fixes + 性能优化）"
+              BBR_APPLIED=true
             else
-              echo "ℹ️ ${patch_name} 尚未发布于内核 ${kernel_series}，跳过"
+              echo "⚠️ base-all 部分冲突，回滚并切换到单独补丁模式"
+              git checkout -- . 2>/dev/null || true
             fi
-          done
-          echo "CachyOS 基础补丁：${PATCHES_APPLIED} 个应用成功"
-
-          # === BBRv3 补丁（必需）===
-          patch_url="${CACHYOS_BASE}/0002-bbr3.patch"
-          echo "检查 BBRv3 补丁是否可用: $patch_url"
-          if ! curl -sfL --head "$patch_url" >/dev/null 2>&1; then
-            echo "::error::BBRv3 补丁尚未发布于内核版本 $kernel_series"
-            exit 1
+          else
+            echo "ℹ️ base-all 尚未发布于内核 ${kernel_series}，跳过"
           fi
-          echo "下载并应用 BBRv3 补丁: $patch_url"
-          curl -fL --retry 3 --retry-delay 2 "$patch_url" -o /tmp/0002-bbr3.patch
-          patch --forward --batch -p1 < /tmp/0002-bbr3.patch
+
+          # ================================================================
+          # 策略 2：单独补丁模式（仅在 base-all 失败时使用）
+          # 先应用 fixes（best-effort），再应用 BBRv3（必需）
+          # ================================================================
+          if ! $BBR_APPLIED; then
+            echo "=== 策略 2：单独补丁模式 ==="
+
+            # --- fixes 补丁（best-effort）---
+            # 编号不固定（6.x 是 0003，7.0 是 0004），逐个探测
+            for num in 0003 0004 0005; do
+              candidate="${CACHYOS_BASE}/${num}-fixes.patch"
+              if curl -sfL --head "$candidate" >/dev/null 2>&1; then
+                echo "下载 fixes 补丁: ${num}-fixes.patch"
+                curl -fL --retry 3 --retry-delay 2 "$candidate" -o "/tmp/${num}-fixes.patch"
+                if patch --forward --batch -p1 < "/tmp/${num}-fixes.patch"; then
+                  echo "✅ ${num}-fixes.patch 应用成功"
+                else
+                  echo "⚠️ ${num}-fixes.patch 应用失败，跳过"
+                fi
+                break
+              fi
+            done
+
+            # --- BBRv3 补丁（必需）---
+            bbr_url="${CACHYOS_BASE}/0002-bbr3.patch"
+            echo "检查 BBRv3 补丁: ${bbr_url}"
+            if ! curl -sfL --head "$bbr_url" >/dev/null 2>&1; then
+              echo "::error::BBRv3 补丁尚未发布于内核版本 ${kernel_series}"
+              exit 1
+            fi
+            echo "下载并应用 BBRv3 补丁..."
+            curl -fL --retry 3 --retry-delay 2 "$bbr_url" -o /tmp/0002-bbr3.patch
+            patch --forward --batch -p1 < /tmp/0002-bbr3.patch
+            BBR_APPLIED=true
+          fi
 
           grep -q "BBR" net/ipv4/tcp_bbr.c
 
