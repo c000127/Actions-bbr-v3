@@ -583,5 +583,22 @@ jobs:
             - 禁用 ~30 个不必要的硬件驱动 + 32 位兼容层
             - CachyOS 社区性能补丁（调度器/内存/驱动修复）
 
-            ### 🛠️ 工具链
+            ### � 安装方式
+            ```bash
+            bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/dev/install.sh)
+            ```
+            安装后选择 **Beta（测试 - 激进优化）** 分支即可。
+
+            或手动下载 .deb 文件后执行：
+            ```bash
+            sudo dpkg -i linux-*.deb && sudo update-grub && sudo reboot
+            ```
+
+            ### ⚠️ 注意
+            - 仅适用于 Debian 11+ / Ubuntu 20.04+ 系统
+            - 需要 Haswell+/Zen+ 以上 CPU（支持 x86-64-v3 指令集）
+            - CPU 漏洞缓解已禁用，仅建议在可信环境中使用
+            - 安装后需重启生效
+
+            ### �🛠️ 工具链
             - GCC 15 (latest)、ccache (latest)、pahole (latest)、zstd (latest)、lz4 (latest)

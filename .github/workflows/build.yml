@@ -359,7 +359,7 @@ jobs:
 
             ### 📦 安装方式
             ```bash
-            bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/main/install.sh)
+            bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/dev/install.sh)
             ```
 
             或手动下载 .deb 文件后执行：
@@ -401,7 +401,7 @@ jobs:
 
           ### 📦 安装方式
           \`\`\`bash
-          bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/main/install.sh)
+          bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/dev/install.sh)
           \`\`\`
 
           或手动下载 .deb 文件后执行：

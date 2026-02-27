@@ -27,16 +27,17 @@ Whether you want to install the latest **BBR v3** kernel with one click, or flex
 
 ### Features
 
-- 👑 One-click install BBR v3 kernel (latest mainline or stable, including RC versions)
+- 👑 One-click install BBR v3 kernel (mainline, stable, or beta, including RC versions)
 - 🍰 Switch acceleration mode (BBR+FQ, BBR+CAKE, etc.)
 - ⚙️ Enable/disable BBR acceleration
 - 🗑️ Uninstall custom kernels
 - 👀 Check current TCP congestion & qdisc settings
+- 🧪 Beta builds with aggressive optimizations (CPU mitigations off, x86-64-v3, HZ=1000)
 
 ### Quick Start
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/heads/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/heads/dev/install.sh)
 ```
 
 ### Kernel Configuration Highlights
@@ -86,11 +87,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/
 
 ### 🌟 功能列表  
 
-👑 **一键安装 BBR v3 内核（支持 mainline / RC / stable）**  
+👑 **一键安装 BBR v3 内核（支持 mainline / stable / beta，含 RC 版本）**  
 🍰 **切换加速模式（BBR+FQ、BBR+CAKE 等）**  
 ⚙️ **开启/关闭 BBR 加速**  
 🗑️ **卸载内核，告别不需要的内核版本**  
 👀 **实时查看当前 TCP 拥塞算法和队列算法**  
+🧪 **Beta 激进优化版本（禁用 CPU 缓解、x86-64-v3、1000Hz、CachyOS 补丁）**  
 🎨 **美化的输出界面，让脚本更有灵魂**  
 
 ---
@@ -99,7 +101,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/
 
 1. **一键运行**  
    ```bash
-   bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/heads/main/install.sh)
+   bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/heads/dev/install.sh)
    ```
 
 ### 🔧 内核配置亮点
@@ -123,14 +125,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/
 
 ```bash
 ╭( ･ㅂ･)و ✧ 你可以选择以下操作哦：
-  1. � 安装或更新 BBR v3 (最新版)
-  2. 📚 指定版本安装
+  1. 🚀 安装或更新 BBR v3 (选择分支，安装最新版)
+  2. 📚 手动选择分支和版本安装
   3. 🔍 检查 BBR v3 状态
   4. ⚡ 启用 BBR + FQ
   5. ⚡ 启用 BBR + FQ_CODEL
   6. ⚡ 启用 BBR + FQ_PIE
   7. ⚡ 启用 BBR + CAKE
   8. 🗑️  卸载 BBR 内核
+  9. 🛠️  查看已安装内核版本类型
 ```
 
 > **小提示：** 如果选错了也没关系，脚本会乖乖告诉你该怎么办！  
