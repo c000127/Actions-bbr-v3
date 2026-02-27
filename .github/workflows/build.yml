@@ -9,9 +9,6 @@ permissions:
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # 内核分支选择：取消注释其中一行（mainline = 主线/RC，stable = 稳定版）
-  KERNEL_BRANCH: mainline
-  #KERNEL_BRANCH: stable
 
 jobs:
   build:
@@ -20,8 +17,16 @@ jobs:
         include:
           - arch: x86_64
             runs_on: ubuntu-latest
+            branch: mainline
+          - arch: x86_64
+            runs_on: ubuntu-latest
+            branch: stable
           #- arch: arm64
           #  runs_on: ubuntu-24.04-arm
+          #  branch: mainline
+          #- arch: arm64
+          #  runs_on: ubuntu-24.04-arm
+          #  branch: stable
     runs-on: ${{ matrix.runs_on }}
     env:
       ARCH: ${{ matrix.arch }}
@@ -48,9 +53,9 @@ jobs:
       - name: 📋 获取最新内核版本
         id: get_kernel_version
         run: |
-          echo "选择的内核分支: ${{ env.KERNEL_BRANCH }}"
+          echo "选择的内核分支: ${{ matrix.branch }}"
           version=$(curl -sL --retry 3 https://www.kernel.org \
-            | grep -A1 -m1 "${{ env.KERNEL_BRANCH }}:" \
+            | grep -A1 -m1 "${{ matrix.branch }}:" \
             | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?')
           if [[ -z "$version" ]]; then
             echo "::error::无法从 kernel.org 获取内核版本号"
@@ -109,13 +114,13 @@ jobs:
           set -euo pipefail
           mkdir -p ./kernel
           cd ./kernel
-          # 逻辑判断：RC 版本用 Tag 从 Torvalds 库下，正式版从 Greg 库下
-          if [[ "${{ env.KERNEL_VERSION }}" == *"-rc"* ]]; then
-            echo "检测到 Mainline/RC 版本，从 Torvalds 仓库克隆 Tag..."
+          # 分支判断：mainline 从 Torvalds 库获取 Tag，stable 从 Greg 库获取分支
+          if [[ "${{ matrix.branch }}" == "mainline" ]]; then
+            echo "Mainline 分支，从 Torvalds 仓库克隆 v${{ env.KERNEL_VERSION }}..."
             git clone --depth=1 --single-branch --no-tags --branch v${{ env.KERNEL_VERSION }} \
               https://github.com/torvalds/linux.git linux
           else
-            echo "检测到 Stable 版本，从 Greg 仓库克隆分支..."
+            echo "Stable 分支，从 kernel.org 仓库克隆分支..."
             branch=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
             git clone --depth=1 --single-branch --no-tags --branch linux-${branch}.y \
               https://github.com/gregkh/linux.git linux
@@ -281,11 +286,11 @@ jobs:
           # -j$(nproc): 充分利用所有 CPU 核心
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ env.KERNEL_BRANCH }}-c000127-bbrv3 \
+              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           else
             make bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ env.KERNEL_BRANCH }}-c000127-bbrv3 \
+              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           fi
           BUILD_END=$(date +%s)
@@ -296,18 +301,18 @@ jobs:
       - name: 📤 上传配置文件
         uses: actions/upload-artifact@v4
         with:
-          name: config-${{ matrix.arch }}
+          name: config-${{ matrix.arch }}-${{ matrix.branch }}
           path: ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
       - name: 📤 上传 Deb 包
         uses: actions/upload-artifact@v4
         with:
-          name: deb-${{ matrix.arch }}
+          name: deb-${{ matrix.arch }}-${{ matrix.branch }}
           path: ./kernel/linux-*.deb
 
       - name: 🧹 清理已有 Release 资源
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_BRANCH }}"
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
           RELEASE=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
@@ -325,18 +330,18 @@ jobs:
       - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_BRANCH }}
+          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}
           files: ./kernel/linux-*.deb
           body: |
-            ## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ env.KERNEL_BRANCH }}) with BBRv3 — ${{ matrix.arch }}
+            ## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
             | 项目 | 值 |
             |---|---|
             | 内核版本 | ${{ env.KERNEL_VERSION }} |
-            | 内核分支 | ${{ env.KERNEL_BRANCH }} |
+            | 内核分支 | ${{ matrix.branch }} |
             | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
             | 架构 | ${{ matrix.arch }} |
-            | BBR 补丁 | CachyOS community patch (version-matched) |
+            | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) (version-matched) |
             | 拥塞控制 | BBRv3 (built-in) |
             | 默认 Qdisc | fq |
             | 定时器 | NO_HZ_IDLE |
@@ -363,22 +368,22 @@ jobs:
 
       - name: 🔄 更新 Release 说明
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_BRANCH }}"
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
           RELEASE_ID=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
             | jq -r '.id')
           if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
-            BODY="## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ env.KERNEL_BRANCH }}) with BBRv3 — ${{ matrix.arch }}
+            BODY="## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
           | 项目 | 值 |
           |---|---|
           | 内核版本 | ${{ env.KERNEL_VERSION }} |
-          | 内核分支 | ${{ env.KERNEL_BRANCH }} |
+          | 内核分支 | ${{ matrix.branch }} |
           | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
           | 架构 | ${{ matrix.arch }} |
-          | BBR 补丁 | CachyOS community patch (version-matched) |
+          | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) (version-matched) |
           | 拥塞控制 | BBRv3 (built-in) |
           | 默认 Qdisc | fq |
           | 定时器 | NO_HZ_IDLE |
