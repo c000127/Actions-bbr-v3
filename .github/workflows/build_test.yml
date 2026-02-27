@@ -289,11 +289,11 @@ jobs:
           # -j$(nproc): 充分利用所有 CPU 核心
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3 \
+              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3-beta \
               KCFLAGS="-pipe"
           else
             make bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3 \
+              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3-beta \
               KCFLAGS="-pipe"
           fi
           BUILD_END=$(date +%s)
@@ -315,7 +315,7 @@ jobs:
 
       - name: 🧹 清理已有 Release 资源
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta"
           RELEASE=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
@@ -333,10 +333,11 @@ jobs:
       - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}
+          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta
+          prerelease: true
           files: ./kernel/linux-*.deb
           body: |
-            ## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
+            ## 🧪 [Beta] Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
             | 项目 | 值 |
             |---|---|
@@ -373,14 +374,14 @@ jobs:
 
       - name: 🔄 更新 Release 说明
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta"
           RELEASE_ID=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
             | jq -r '.id')
           if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
-            BODY="## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
+            BODY="## 🧪 [Beta] Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
           | 项目 | 值 |
           |---|---|
