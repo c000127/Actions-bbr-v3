@@ -148,9 +148,25 @@ ask_to_save() {
     fi
 }
 
-# 函数：获取已安装的内核版本
+# 函数：规范化内核版本号（补齐 SUBLEVEL）
+# "7.0-rc1" → "7.0.0-rc1"，"7.0" → "7.0.0"，"6.12.5" 不变
+normalize_version() {
+    local ver="$1"
+    if [[ "$ver" =~ ^([0-9]+\.[0-9]+)(-.*)?$ ]]; then
+        echo "${BASH_REMATCH[1]}.0${BASH_REMATCH[2]}"
+    else
+        echo "$ver"
+    fi
+}
+
+# 函数：获取已安装的内核版本（去除品牌后缀，返回纯版本号）
 get_installed_version() {
-    dpkg -l | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | sed 's/linux-image-//' | head -n 1
+    local pkg
+    pkg=$(dpkg -l | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | head -n 1)
+    if [[ -n "$pkg" ]]; then
+        # linux-image-7.0.0-rc1-c000127-bbrv3 → 7.0.0-rc1
+        echo "$pkg" | sed "s/linux-image-//;s/-${KERNEL_BRAND}//"
+    fi
 }
 
 # 函数：智能更新引导加载程序
@@ -233,9 +249,10 @@ install_latest_version() {
 
     CORE_LATEST_VERSION="${LATEST_TAG_NAME#x86_64-}"
     CORE_LATEST_VERSION="${CORE_LATEST_VERSION#arm64-}"
+    # 规范化版本号：tag 中 "7.0-rc1" → "7.0.0-rc1"，与 dpkg 包名对齐
+    CORE_LATEST_NORMALIZED=$(normalize_version "$CORE_LATEST_VERSION")
 
-    if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$CORE_LATEST_VERSION"* ]]; then
-        # 修复了此处的颜文字，将反引号 ` 替换为单引号 '
+    if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$CORE_LATEST_NORMALIZED" ]]; then
         echo -e "\033[1;32m(o'▽'o) 您已安装最新版本，无需更新！\033[0m"
         return 0
     fi

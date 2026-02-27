@@ -91,18 +91,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          # 使用主版本号作为 key，跨 rc/patch 版本复用缓存
-          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}
+          # 每次构建使用唯一 key（附加 run_id），确保更新后的缓存能被保存
+          # 恢复时按主版本号前缀匹配最近一次缓存
+          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ github.run_id }}
           restore-keys: |
+            ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
             ccache-${{ matrix.arch }}-
 
-      - name: 📁 创建源码目录
-        run: mkdir -p ./kernel/linux
-
       - name: ⬇️ 下载内核源代码
-        working-directory: ./kernel
         run: |
           set -euo pipefail
+          mkdir -p ./kernel
+          cd ./kernel
           # 逻辑判断：RC 版本用 Tag 从 Torvalds 库下，正式版从 Greg 库下
           if [[ "${{ env.KERNEL_VERSION }}" == *"-rc"* ]]; then
             echo "检测到 Mainline/RC 版本，从 Torvalds 仓库克隆 Tag..."
@@ -268,12 +268,10 @@ jobs:
           KBUILD_BUILD_TIMESTAMP: ''
           KBUILD_BUILD_USER: c000127
           KBUILD_BUILD_HOST: github
+          # 跳过 .deb 内部压缩（节省 ~30 秒打包时间，安装时无影响）
+          KDEB_COMPRESS: none
         run: |
           set -euo pipefail
-          native_arch=$(dpkg --print-architecture)
-          sudo apt-get install -y --no-install-recommends "libdw-dev:${native_arch}" || sudo apt-get install -y --no-install-recommends libdw-dev
-          dpkg-query -W -f='${Package}:${Architecture} ${Status}\n' "libdw-dev:${native_arch}" || true
-
           BUILD_START=$(date +%s)
           # -pipe: 使用管道替代临时文件传递编译阶段数据
           # -j$(nproc): 充分利用所有 CPU 核心
