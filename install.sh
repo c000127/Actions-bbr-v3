@@ -203,10 +203,11 @@ install_packages() {
     fi
 
     echo -e "\033[36m开始安装新内核... \033[0m"
-    if sudo dpkg -i "$DOWNLOAD_DIR"/linux-*.deb && update_bootloader; then
+    # dpkg postinst 会自动执行 update-initramfs 和 update-grub
+    if sudo dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
         echo -e "\033[1;32m━━━━━━━━ 安装完成 ━━━━━━━━\033[0m"
-        NEW_KERNEL_VER=$(dpkg -l | grep linux-image | grep "$KERNEL_BRAND" | awk '{print $3}' | head -n 1)
-        echo -e "\033[36m  内核版本：\033[1;32m${NEW_KERNEL_VER:-"未知"}\033[0m"
+        NEW_KERNEL_VER=$(get_installed_version)
+        echo -e "\033[36m  已安装：\033[1;32m${NEW_KERNEL_VER:-"未知"}\033[0m"
         echo -e "\033[36m  当前运行：\033[1;32m$(uname -r)\033[0m"
         echo -e "\033[33m  ⚠ 需要重启后生效\033[0m"
         echo -n -e "\033[33m是否立即重启？ (y/n): \033[0m"
@@ -218,7 +219,7 @@ install_packages() {
             echo -e "\033[33m操作完成。请记得稍后手动重启 ('sudo reboot') 来应用新内核。\033[0m"
         fi
     else
-        echo -e "\033[1;31m内核安装或引导更新失败！系统可能处于不稳定状态。请不要重启并寻求手动修复！\033[0m"
+        echo -e "\033[1;31m内核安装失败！请检查 dpkg 输出信息并手动修复。\033[0m"
     fi
 }
 
@@ -242,13 +243,11 @@ install_latest_version() {
         echo -e "\033[31m未找到适合当前架构 ($ARCH) 的最新版本。\033[0m"
         return 1
     fi
-    echo -e "\033[36m检测到最新版本：\033[0m\033[1;32m$LATEST_TAG_NAME\033[0m"
-
-    INSTALLED_VERSION=$(get_installed_version)
-    echo -e "\033[36m当前已安装版本：\033[0m\033[1;32m${INSTALLED_VERSION:-"未安装"}\033[0m"
-
     CORE_LATEST_VERSION="${LATEST_TAG_NAME#x86_64-}"
     CORE_LATEST_VERSION="${CORE_LATEST_VERSION#arm64-}"
+    INSTALLED_VERSION=$(get_installed_version)
+    echo -e "\033[36m最新版本：\033[0m\033[1;32m$CORE_LATEST_VERSION\033[0m  \033[36m已安装：\033[0m\033[1;32m${INSTALLED_VERSION:-"未安装"}\033[0m"
+
     # 规范化版本号：tag 中 "7.0-rc1" → "7.0.0-rc1"，与 dpkg 包名对齐
     CORE_LATEST_NORMALIZED=$(normalize_version "$CORE_LATEST_VERSION")
 
@@ -257,14 +256,18 @@ install_latest_version() {
         return 0
     fi
 
-    echo -e "\033[33m发现新版本或未安装内核，准备下载...\033[0m"
+    echo -e "\033[33m准备下载新版本...\033[0m"
     ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$LATEST_TAG_NAME" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
     
     rm -f "$DOWNLOAD_DIR"/linux-*.deb
 
     for URL in $ASSET_URLS; do
-        echo -e "\033[36m正在下载文件：$URL\033[0m"
-        wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$URL\033[0m"; return 1; }
+        # 跳过 linux-libc-dev（仅包含 C 库头文件，运行内核不需要）
+        [[ "$URL" == *"linux-libc-dev"* ]] && continue
+        local FILENAME
+        FILENAME=$(basename "$URL")
+        echo -e "\033[36m正在下载：$FILENAME\033[0m"
+        wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$FILENAME\033[0m"; return 1; }
     done
     
     install_packages
@@ -292,9 +295,18 @@ install_specific_version() {
 
     echo -e "\033[36m以下为适用于当前架构的版本：\033[0m"
     IFS=$'\n' read -rd '' -a TAG_ARRAY <<<"$MATCH_TAGS"
+    local INSTALLED_VERSION
+    INSTALLED_VERSION=$(get_installed_version)
 
     for i in "${!TAG_ARRAY[@]}"; do
-        echo -e "\033[33m $((i+1)). ${TAG_ARRAY[$i]}\033[0m"
+        local tag_ver="${TAG_ARRAY[$i]#${ARCH_FILTER}-}"
+        local norm_ver
+        norm_ver=$(normalize_version "$tag_ver")
+        if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$norm_ver" ]]; then
+            echo -e "\033[33m $((i+1)). $tag_ver \033[1;32m← 已安装\033[0m"
+        else
+            echo -e "\033[33m $((i+1)). $tag_ver\033[0m"
+        fi
     done
 
     echo -n -e "\033[36m请输入要安装的版本编号（例如 1）：\033[0m"
@@ -307,15 +319,19 @@ install_specific_version() {
     
     INDEX=$((CHOICE-1))
     SELECTED_TAG="${TAG_ARRAY[$INDEX]}"
-    echo -e "\033[36m已选择版本：\033[0m\033[1;32m$SELECTED_TAG\033[0m"
+    local selected_ver="${SELECTED_TAG#${ARCH_FILTER}-}"
+    echo -e "\033[36m已选择版本：\033[0m\033[1;32m$selected_ver\033[0m"
 
     ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$SELECTED_TAG" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
     
     rm -f "$DOWNLOAD_DIR"/linux-*.deb
     
     for URL in $ASSET_URLS; do
-        echo -e "\033[36m下载中：$URL\033[0m"
-        wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$URL\033[0m"; return 1; }
+        [[ "$URL" == *"linux-libc-dev"* ]] && continue
+        local FILENAME
+        FILENAME=$(basename "$URL")
+        echo -e "\033[36m下载中：$FILENAME\033[0m"
+        wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$FILENAME\033[0m"; return 1; }
     done
 
     install_packages
@@ -328,12 +344,20 @@ print_separator() {
 
 # --- 主要执行流程 ---
 
+RUNNING_KERNEL=$(uname -r)
+INSTALLED_BBR_VER=$(get_installed_version)
+
 clear
 print_separator
 echo -e "\033[1;35m(☆ω☆)✧*｡ 欢迎来到 BBR 管理脚本世界哒！ ✧*｡(☆ω☆)\033[0m"
 print_separator
-echo -e "\033[36m当前 TCP 拥塞控制算法：\033[0m\033[1;32m$CURRENT_ALGO\033[0m"
-echo -e "\033[36m当前队列管理算法：    \033[0m\033[1;32m$CURRENT_QDISC\033[0m"
+echo -e "\033[36m运行内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m"
+if [[ -n "$INSTALLED_BBR_VER" ]]; then
+    echo -e "\033[36mBBR 内核：\033[0m\033[1;32m${INSTALLED_BBR_VER} ✔\033[0m"
+else
+    echo -e "\033[36mBBR 内核：\033[0m\033[33m未安装\033[0m"
+fi
+echo -e "\033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
 print_separator
 echo -e "\033[1;33m作者：Joey  |  博客：https://joeyblog.net  |  反馈群组：https://t.me/+ft-zI76oovgwNmRh\033[0m"
 print_separator
