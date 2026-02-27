@@ -71,9 +71,8 @@ Disable-Option ([ref]$content) "CONFIG_ZRAM_DEF_COMP_LZORLE"
 Enable-Option ([ref]$content) "CONFIG_ZRAM_DEF_COMP_ZSTD"
 $content = $content -replace 'CONFIG_ZRAM_DEF_COMP="lzo-rle"', 'CONFIG_ZRAM_DEF_COMP="zstd"'
 
-# 7. Enable AMD microcode loading (VPS may run on AMD EPYC)
-Write-Host "  [*] Enable MICROCODE_AMD"
-Enable-Option ([ref]$content) "CONFIG_MICROCODE_AMD"
+# 7. Microcode: kernel 7.0 merged Intel/AMD into unified CONFIG_MICROCODE
+# CONFIG_MICROCODE_AMD is no longer a separate option; no action needed
 
 Write-Host "`n=== DISABLE VPS-UNNECESSARY SUBSYSTEMS ==="
 

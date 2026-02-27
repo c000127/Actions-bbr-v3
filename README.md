@@ -43,8 +43,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/
 |---|---|---|
 | Congestion Control | BBR v3 (built-in) | Best-in-class congestion control |
 | Default Qdisc | fq | Optimal pairing with BBR |
-| Timer Frequency | 1000 HZ | Better latency for network workloads |
-| Preemption | Voluntary | Good balance for server use |
+| Timer Frequency | 250 HZ | Balanced latency/throughput for VPS |
+| Preemption | PREEMPT_LAZY | Low-latency with minimal overhead (6.12+) |
 | BPF/eBPF | Enabled | Modern networking & observability |
 
 ---
