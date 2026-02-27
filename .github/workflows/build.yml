@@ -56,6 +56,8 @@ jobs:
           echo "KERNEL_VERSION=$version" >> $GITHUB_ENV
           # 提取主版本号（用于 ccache key 和补丁查找）
           echo "KERNEL_SERIES=$(echo $version | grep -oP '^\d+\.\d+')" >> $GITHUB_ENV
+          # 构建时间戳（精确到分钟），用于区分同一内核版本的多次编译
+          echo "BUILD_TIMESTAMP=$(date -u +%Y%m%d%H%M)" >> $GITHUB_ENV
 
       - name: 📥 检出仓库代码
         uses: actions/checkout@v4
@@ -277,11 +279,11 @@ jobs:
           # -j$(nproc): 充分利用所有 CPU 核心
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-c000127-bbrv3 \
+              LOCALVERSION=-${{ env.BUILD_TIMESTAMP }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           else
             make bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-c000127-bbrv3 \
+              LOCALVERSION=-${{ env.BUILD_TIMESTAMP }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           fi
           BUILD_END=$(date +%s)
@@ -304,7 +306,7 @@ jobs:
       - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}
+          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.BUILD_TIMESTAMP }}
           files: ./kernel/linux-*.deb
           body: |
             ## 🚀 Linux ${{ env.KERNEL_VERSION }} with BBRv3 — ${{ matrix.arch }}
@@ -312,6 +314,7 @@ jobs:
             | 项目 | 值 |
             |---|---|
             | 内核版本 | ${{ env.KERNEL_VERSION }} |
+            | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
             | 架构 | ${{ matrix.arch }} |
             | 拥塞控制 | BBRv3 (built-in) |
             | 默认 Qdisc | fq |

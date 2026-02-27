@@ -164,7 +164,7 @@ get_installed_version() {
     local pkg
     pkg=$(dpkg -l | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | head -n 1)
     if [[ -n "$pkg" ]]; then
-        # linux-image-7.0.0-rc1-c000127-bbrv3 → 7.0.0-rc1
+        # linux-image-7.0.0-rc1-202602271430-c000127-bbrv3 → 7.0.0-rc1-202602271430
         echo "$pkg" | sed "s/linux-image-//;s/-${KERNEL_BRAND}//"
     fi
 }
