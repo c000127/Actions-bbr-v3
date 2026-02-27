@@ -64,7 +64,7 @@ jobs:
           echo "获取到内核版本: $version"
           echo "KERNEL_VERSION=$version" >> $GITHUB_ENV
           # 提取主版本号（用于 ccache key 和补丁查找）
-          echo "KERNEL_SERIES=$(echo $version | grep -oP '^\d+\.\d+')" >> $GITHUB_ENV
+          echo "KERNEL_SERIES=$(echo "$version" | grep -oP '^\d+\.\d+')" >> $GITHUB_ENV
           # 构建时间戳（精确到分钟），用于区分同一内核版本的多次编译
           echo "BUILD_TIMESTAMP=$(date -u +%Y%m%d%H%M)" >> $GITHUB_ENV
 
@@ -162,6 +162,7 @@ jobs:
       - name: 🔢 更新 Makefile 版本号
         working-directory: ./kernel/linux
         run: |
+          set -euo pipefail
           # 增加容错处理，防止 RC 版本导致变量为空
           v=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f1)
           p=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f2 | cut -d- -f1)
@@ -177,6 +178,7 @@ jobs:
       - name: ⚙️ 准备内核配置
         working-directory: ./kernel/linux
         run: |
+          set -euo pipefail
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             cp ${{ github.workspace }}/arm64.config .config
           else
@@ -346,6 +348,8 @@ jobs:
             | 拥塞控制 | BBRv3 (built-in) |
             | 默认 Qdisc | fq |
             | 定时器 | NO_HZ_IDLE |
+            | 抢占模型 | PREEMPT_LAZY |
+            | 时钟频率 | HZ=250 |
             | 内核压缩 | ZSTD |
             | 编译优化 | ccache + VPS 精简配置 |
 
