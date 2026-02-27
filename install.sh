@@ -174,12 +174,12 @@ normalize_version() {
     fi
 }
 
-# 函数：获取已安装的内核版本（去除品牌后缀，返回纯版本号）
+# 函数：获取已安装的内核版本（去除品牌后缀，返回版本号+分支）
 get_installed_version() {
     local pkg
     pkg=$(dpkg -l | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | head -n 1)
     if [[ -n "$pkg" ]]; then
-        # linux-image-7.0.0-rc1-202602271430-c000127-bbrv3 → 7.0.0-rc1-202602271430
+        # linux-image-7.0.0-rc1-mainline-c000127-bbrv3 → 7.0.0-rc1-mainline
         echo "$pkg" | sed "s/linux-image-//;s/-${KERNEL_BRAND}//"
     fi
 }
@@ -263,7 +263,7 @@ install_latest_version() {
     INSTALLED_VERSION=$(get_installed_version)
     echo -e "\033[36m最新版本：\033[0m\033[1;32m$CORE_LATEST_VERSION\033[0m  \033[36m已安装：\033[0m\033[1;32m${INSTALLED_VERSION:-"未安装"}\033[0m"
 
-    # 规范化版本号：tag 中 "7.0-rc1" → "7.0.0-rc1"，与 dpkg 包名对齐
+    # 规范化版本号：tag 中 "7.0-rc1-mainline" → "7.0.0-rc1-mainline"，与 dpkg 包名对齐
     CORE_LATEST_NORMALIZED=$(normalize_version "$CORE_LATEST_VERSION")
 
     if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$CORE_LATEST_NORMALIZED" ]]; then

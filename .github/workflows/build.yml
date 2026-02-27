@@ -281,11 +281,11 @@ jobs:
           # -j$(nproc): 充分利用所有 CPU 核心
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ env.BUILD_TIMESTAMP }}-c000127-bbrv3 \
+              LOCALVERSION=-${{ env.KERNEL_BRANCH }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           else
             make bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ env.BUILD_TIMESTAMP }}-c000127-bbrv3 \
+              LOCALVERSION=-${{ env.KERNEL_BRANCH }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           fi
           BUILD_END=$(date +%s)
@@ -308,14 +308,15 @@ jobs:
       - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.BUILD_TIMESTAMP }}
+          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_BRANCH }}
           files: ./kernel/linux-*.deb
           body: |
-            ## 🚀 Linux ${{ env.KERNEL_VERSION }} with BBRv3 — ${{ matrix.arch }}
+            ## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ env.KERNEL_BRANCH }}) with BBRv3 — ${{ matrix.arch }}
 
             | 项目 | 值 |
             |---|---|
             | 内核版本 | ${{ env.KERNEL_VERSION }} |
+            | 内核分支 | ${{ env.KERNEL_BRANCH }} |
             | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
             | 架构 | ${{ matrix.arch }} |
             | BBR 补丁 | CachyOS community patch (version-matched) |
