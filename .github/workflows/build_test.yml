@@ -66,64 +66,123 @@ jobs:
           dpkg -l | grep -E 'gcc-|g\+\+-|binutils|make |libssl|libelf|libncurses|libdw|liblz4|libzstd|dwarves|pahole|ccache|bison|flex|build-essential|dpkg-dev|debhelper|fakeroot|kmod|linux-libc' | awk '{printf "%-40s %s\n", $2, $3}'
 
       - name: 🔧 安装构建依赖（最新版工具链）
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          FAIL_COUNT=0
+          GH_API="Authorization: Bearer ${GH_TOKEN}"
+
+          # 辅助函数：获取 GitHub 最新 release tag（去掉 v 前缀）
+          gh_latest() {
+            curl -sf -H "${GH_API}" "https://api.github.com/repos/$1/releases/latest" | jq -r .tag_name | tr -d 'v'
+          }
 
           # ===== 1. GCC 15（最新版编译器）=====
+          echo "===== [1/5] GCC 15 ====="
           sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update -qq
+          # 不安装 cmake（系统自带 3.31.6，apt 仓库只有 3.28.3 会降级）
           sudo apt-get install -y --no-install-recommends \
             gcc-15 g++-15 \
             git build-essential ccache \
             libncurses-dev libssl-dev libelf-dev libdw-dev \
             bison bc flex rsync debhelper \
             dpkg-dev fakeroot kmod cpio dwarves \
-            lz4 zstd xz-utils curl jq patch cmake
+            lz4 zstd xz-utils curl jq patch
           # 设置 GCC 15 为默认编译器
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 150 \
             --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
             --slave /usr/bin/gcov gcov /usr/bin/gcov-15
+          echo "✅ GCC 15 安装完成: $(gcc-15 --version | head -1)"
 
           # ===== 2. ccache（最新版编译缓存）=====
-          CCACHE_VER=$(curl -sf https://api.github.com/repos/ccache/ccache/releases/latest | jq -r .tag_name | tr -d 'v')
-          echo "升级 ccache → ${CCACHE_VER}"
-          mkdir -p /tmp/ccache-install
-          curl -fL "https://github.com/ccache/ccache/releases/download/v${CCACHE_VER}/ccache-${CCACHE_VER}-linux-$(uname -m).tar.xz" \
-            -o /tmp/ccache.tar.xz
-          tar -xJf /tmp/ccache.tar.xz -C /tmp/ccache-install --strip-components=1
-          sudo install -m 755 /tmp/ccache-install/ccache /usr/bin/ccache
-          # 确保 ccache 符号链接覆盖 GCC 15
-          for prog in gcc g++ cc c++ gcc-15 g++-15; do
-            sudo ln -sf /usr/bin/ccache "/usr/lib/ccache/${prog}"
-          done
+          echo "===== [2/5] ccache ====="
+          if CCACHE_VER=$(gh_latest ccache/ccache) && [ -n "${CCACHE_VER}" ]; then
+            echo "升级 ccache → ${CCACHE_VER}"
+            mkdir -p /tmp/ccache-install
+            if curl -fL "https://github.com/ccache/ccache/releases/download/v${CCACHE_VER}/ccache-${CCACHE_VER}-linux-$(uname -m).tar.xz" \
+              -o /tmp/ccache.tar.xz; then
+              tar -xJf /tmp/ccache.tar.xz -C /tmp/ccache-install --strip-components=1
+              sudo install -m 755 /tmp/ccache-install/ccache /usr/bin/ccache
+              for prog in gcc g++ cc c++ gcc-15 g++-15; do
+                sudo ln -sf /usr/bin/ccache "/usr/lib/ccache/${prog}"
+              done
+              echo "✅ ccache 升级完成: $(ccache --version | head -1)"
+            else
+              echo "⚠️ ccache 二进制下载失败，保留 apt 版本"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          else
+            echo "⚠️ 无法获取 ccache 最新版本号，保留 apt 版本"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          fi
 
           # ===== 3. pahole/dwarves（最新版 BTF 生成工具）=====
-          PAHOLE_VER=$(curl -sf https://api.github.com/repos/acmel/dwarves/releases/latest | jq -r .tag_name | tr -d 'v')
-          echo "升级 pahole → ${PAHOLE_VER}"
-          git clone --depth=1 --branch "v${PAHOLE_VER}" https://github.com/acmel/dwarves.git /tmp/dwarves
-          cmake -S /tmp/dwarves -B /tmp/dwarves/build \
-            -DCMAKE_INSTALL_PREFIX=/usr -D__LIB=lib -DCMAKE_BUILD_TYPE=Release
-          make -C /tmp/dwarves/build -j$(nproc)
-          sudo make -C /tmp/dwarves/build install
+          echo "===== [3/5] pahole/dwarves ====="
+          if PAHOLE_VER=$(gh_latest acmel/dwarves) && [ -n "${PAHOLE_VER}" ]; then
+            echo "升级 pahole → ${PAHOLE_VER}"
+            if git clone --depth=1 --branch "v${PAHOLE_VER}" https://github.com/acmel/dwarves.git /tmp/dwarves 2>&1; then
+              cmake -S /tmp/dwarves -B /tmp/dwarves/build \
+                -DCMAKE_INSTALL_PREFIX=/usr -D__LIB=lib -DCMAKE_BUILD_TYPE=Release
+              make -C /tmp/dwarves/build -j"$(nproc)"
+              sudo make -C /tmp/dwarves/build install
+              echo "✅ pahole 升级完成: $(pahole --version 2>&1 | head -1)"
+            else
+              echo "⚠️ pahole 源码克隆/构建失败，保留 apt 版本 (1.25)"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          else
+            echo "⚠️ 无法获取 pahole 最新版本号，保留 apt 版本 (1.25)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          fi
 
           # ===== 4. zstd（最新版压缩工具）=====
-          ZSTD_VER=$(curl -sf https://api.github.com/repos/facebook/zstd/releases/latest | jq -r .tag_name | tr -d 'v')
-          echo "升级 zstd → ${ZSTD_VER}"
-          curl -fL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-${ZSTD_VER}.tar.gz" \
-            | tar -xz -C /tmp
-          make -C "/tmp/zstd-${ZSTD_VER}" -j$(nproc)
-          sudo make -C "/tmp/zstd-${ZSTD_VER}" install PREFIX=/usr
+          echo "===== [4/5] zstd ====="
+          if ZSTD_VER=$(gh_latest facebook/zstd) && [ -n "${ZSTD_VER}" ]; then
+            echo "升级 zstd → ${ZSTD_VER}"
+            if curl -fL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-${ZSTD_VER}.tar.gz" \
+              | tar -xz -C /tmp; then
+              make -C "/tmp/zstd-${ZSTD_VER}" -j"$(nproc)"
+              sudo make -C "/tmp/zstd-${ZSTD_VER}" install PREFIX=/usr
+              echo "✅ zstd 升级完成: $(zstd --version 2>&1 | head -1)"
+            else
+              echo "⚠️ zstd 源码下载/构建失败，保留系统版本"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          else
+            echo "⚠️ 无法获取 zstd 最新版本号，保留系统版本"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          fi
 
           # ===== 5. lz4（最新版压缩工具）=====
-          LZ4_VER=$(curl -sf https://api.github.com/repos/lz4/lz4/releases/latest | jq -r .tag_name | tr -d 'v')
-          echo "升级 lz4 → ${LZ4_VER}"
-          curl -fL "https://github.com/lz4/lz4/releases/download/v${LZ4_VER}/lz4-${LZ4_VER}.tar.gz" \
-            | tar -xz -C /tmp
-          make -C "/tmp/lz4-${LZ4_VER}" -j$(nproc)
-          sudo make -C "/tmp/lz4-${LZ4_VER}" install PREFIX=/usr
+          echo "===== [5/5] lz4 ====="
+          if LZ4_VER=$(gh_latest lz4/lz4) && [ -n "${LZ4_VER}" ]; then
+            echo "升级 lz4 → ${LZ4_VER}"
+            if curl -fL "https://github.com/lz4/lz4/releases/download/v${LZ4_VER}/lz4-${LZ4_VER}.tar.gz" \
+              | tar -xz -C /tmp; then
+              make -C "/tmp/lz4-${LZ4_VER}" -j"$(nproc)"
+              sudo make -C "/tmp/lz4-${LZ4_VER}" install PREFIX=/usr
+              echo "✅ lz4 升级完成: $(lz4 --version 2>&1 | head -1)"
+            else
+              echo "⚠️ lz4 源码下载/构建失败，保留系统版本"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          else
+            echo "⚠️ 无法获取 lz4 最新版本号，保留系统版本"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          fi
 
           # 更新动态链接器缓存
           sudo ldconfig
+
+          echo ""
+          echo "===== 工具升级汇总 ====="
+          if [ "${FAIL_COUNT}" -eq 0 ]; then
+            echo "✅ 全部 5 个工具升级成功"
+          else
+            echo "⚠️ ${FAIL_COUNT} 个工具升级失败（已回退到 apt/系统版本）"
+          fi
 
       - name: 📊 记录升级后工具版本
         run: |
