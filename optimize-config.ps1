@@ -74,6 +74,83 @@ $content = $content -replace 'CONFIG_ZRAM_DEF_COMP="lzo-rle"', 'CONFIG_ZRAM_DEF_
 # 7. Microcode: kernel 7.0 merged Intel/AMD into unified CONFIG_MICROCODE
 # CONFIG_MICROCODE_AMD is no longer a separate option; no action needed
 
+Write-Host "`n=== AGGRESSIVE PERFORMANCE OPTIMIZATIONS ==="
+
+# Helper: set a config option to a specific integer value
+function Set-OptionValue([ref]$Content, [string]$Opt, [string]$Val) {
+    $escaped = [regex]::Escape($Opt)
+    $pattern = "(?m)^(# ${escaped} is not set|${escaped}=.*)$"
+    if ($Content.Value -match $pattern) {
+        $Content.Value = $Content.Value -replace $pattern, "${Opt}=${Val}"
+    } else {
+        Write-Warning "Option $Opt not found in config"
+    }
+}
+
+# 8. [AGGRESSIVE] Disable CPU vulnerability mitigations (5-30% performance gain)
+Write-Host "  [!] Disable CPU_MITIGATIONS (Spectre/Meltdown/MDS/SRSO/GDS...)"
+Disable-Option ([ref]$content) "CONFIG_CPU_MITIGATIONS"
+
+# 9. [AGGRESSIVE] Reduce NR_CPUS: 8192 -> 256 (less per-CPU memory overhead)
+Write-Host "  [!] Disable MAXSMP, set NR_CPUS=256"
+Disable-Option ([ref]$content) "CONFIG_MAXSMP"
+Set-OptionValue ([ref]$content) "CONFIG_NR_CPUS" "256"
+
+# 10. [AGGRESSIVE] Timer frequency: 250Hz -> 1000Hz (lower scheduling/network latency)
+Write-Host "  [!] Timer: HZ=250 -> HZ=1000"
+Disable-Option ([ref]$content) "CONFIG_HZ_100"
+Disable-Option ([ref]$content) "CONFIG_HZ_250"
+Disable-Option ([ref]$content) "CONFIG_HZ_300"
+Enable-Option ([ref]$content) "CONFIG_HZ_1000"
+Set-OptionValue ([ref]$content) "CONFIG_HZ" "1000"
+
+# 11. [AGGRESSIVE] Disable IA-32 emulation (pure 64-bit VPS)
+Write-Host "  [!] Disable IA32_EMULATION + X86_X32_ABI"
+Disable-Option ([ref]$content) "CONFIG_IA32_EMULATION"
+Disable-Option ([ref]$content) "CONFIG_X86_X32_ABI"
+
+# 12. Enable BTF debug info (required for eBPF CO-RE / modern observability)
+Write-Host "  [*] Enable DEBUG_INFO_BTF (eBPF CO-RE)"
+Disable-Option ([ref]$content) "CONFIG_DEBUG_INFO_NONE"
+Enable-Option ([ref]$content) "CONFIG_DEBUG_INFO"
+Enable-Option ([ref]$content) "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT"
+Enable-Option ([ref]$content) "CONFIG_DEBUG_INFO_BTF"
+Enable-Option ([ref]$content) "CONFIG_DEBUG_INFO_BTF_MODULES"
+
+# 13. RCU deep optimization
+Write-Host "  [*] RCU: NOCB_CPU_DEFAULT_ALL + LAZY default on"
+Enable-Option ([ref]$content) "CONFIG_RCU_NOCB_CPU_DEFAULT_ALL"
+Disable-Option ([ref]$content) "CONFIG_RCU_LAZY_DEFAULT_OFF"
+
+# 14. TEO CPU idle governor (smarter idle prediction for VPS)
+Write-Host "  [*] Enable CPU_IDLE_GOV_TEO"
+Enable-Option ([ref]$content) "CONFIG_CPU_IDLE_GOV_TEO"
+
+# 15. ZSWAP exclusive loads (page read from zswap auto-deleted from swap backend)
+Write-Host "  [*] Enable ZSWAP_EXCLUSIVE_LOADS_DEFAULT_ON"
+Enable-Option ([ref]$content) "CONFIG_ZSWAP_EXCLUSIVE_LOADS_DEFAULT_ON"
+
+# 16. Module compression: none -> ZSTD
+Write-Host "  [*] Module compression: ZSTD"
+Disable-Option ([ref]$content) "CONFIG_MODULE_COMPRESS_NONE"
+Enable-Option ([ref]$content) "CONFIG_MODULE_COMPRESS_ZSTD"
+
+# 17. Haltpoll cpuidle (reduce VMEXIT latency in VMs)
+Write-Host "  [*] Enable HALTPOLL_CPUIDLE"
+Enable-Option ([ref]$content) "CONFIG_HALTPOLL_CPUIDLE"
+
+# 18. Network extras
+Write-Host "  [*] Enable TLS offload, MPTCP, XDP_SOCKETS, TCP_AO"
+Enable-Option ([ref]$content) "CONFIG_TLS" "m"
+Enable-Option ([ref]$content) "CONFIG_TLS_DEVICE"
+Enable-Option ([ref]$content) "CONFIG_MPTCP"
+Enable-Option ([ref]$content) "CONFIG_XDP_SOCKETS"
+Enable-Option ([ref]$content) "CONFIG_TCP_AO"
+
+# 19. sched_ext (loadable external schedulers)
+Write-Host "  [*] Enable SCHED_CLASS_EXT"
+Enable-Option ([ref]$content) "CONFIG_SCHED_CLASS_EXT"
+
 Write-Host "`n=== DISABLE VPS-UNNECESSARY SUBSYSTEMS ==="
 
 # --- Sound (huge build-time savings) ---
@@ -332,11 +409,24 @@ Write-Host "Optimized config written to $ConfigPath"
 Write-Host "Backup available at $BackupPath"
 Write-Host ""
 Write-Host "Summary of major changes:"
-Write-Host "  - ZSTD kernel compression (faster boot)"
+Write-Host ""
+Write-Host "  === AGGRESSIVE OPTIMIZATIONS ==="
+Write-Host "  - [!] CPU_MITIGATIONS disabled (5-30% perf gain, security trade-off)"
+Write-Host "  - [!] NR_CPUS: 8192 -> 256 (reduced per-CPU memory overhead)"
+Write-Host "  - [!] HZ: 250 -> 1000 (lower scheduling/network latency)"
+Write-Host "  - [!] IA32_EMULATION + X86_X32_ABI disabled (pure 64-bit)"
+Write-Host ""
+Write-Host "  === PERFORMANCE FEATURES ==="
+Write-Host "  - ZSTD kernel + module compression (faster boot, smaller /lib/modules)"
 Write-Host "  - NO_HZ_IDLE timer (reduced overhead vs NO_HZ_FULL)"
-Write-Host "  - BPF_JIT_ALWAYS_ON, ZSWAP_DEFAULT_ON, PAGE_POOL_STATS"
-Write-Host "  - ZRAM default compression: zstd"
-Write-Host "  - AMD microcode loading enabled"
+Write-Host "  - BPF_JIT_ALWAYS_ON, DEBUG_INFO_BTF (eBPF CO-RE)"
+Write-Host "  - ZSWAP (ZSTD, exclusive loads) + ZRAM (ZSTD)"
+Write-Host "  - RCU_NOCB_CPU_DEFAULT_ALL + RCU_LAZY default on"
+Write-Host "  - CPU_IDLE_GOV_TEO + HALTPOLL_CPUIDLE (VM-optimized idle)"
+Write-Host "  - TCP_AO, MPTCP, TLS offload, XDP_SOCKETS, sched_ext"
+Write-Host "  - PAGE_POOL_STATS, MICROCODE (unified)"
+Write-Host ""
+Write-Host "  === STRIPPED SUBSYSTEMS ==="
 Write-Host "  - Disabled: Sound, WiFi, Bluetooth, NFC, Media, IR"
 Write-Host "  - Disabled: Heavy GPU drivers (Radeon, AMDGPU, Nouveau, i915)"
 Write-Host "  - Disabled: CAN, HAMRADIO, ISDN, FireWire, MTD, PCMCIA"
@@ -351,4 +441,5 @@ Write-Host "  cloud NICs (e1000e, ENA, virtio_net, vmxnet3, hv_netvsc),"
 Write-Host "  BBRv3, FQ, nftables, WireGuard, Docker/container support,"
 Write-Host "  ext4, XFS, Btrfs, NFS, CIFS, OverlayFS, crypto, security."
 Write-Host ""
+Write-Host "Build with: KCFLAGS='-march=x86-64-v3 -pipe' for modern VPS CPUs."
 Write-Host "Run 'make olddefconfig' in the build to resolve dependencies."

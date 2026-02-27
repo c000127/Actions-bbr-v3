@@ -222,7 +222,7 @@ jobs:
             https://github.com/torvalds/linux.git linux
           echo "内核源码下载完成，目录大小: $(du -sh linux | cut -f1)"
 
-      - name: 🩹 注入 BBRv3 补丁
+      - name: 🩹 注入 CachyOS 性能补丁 + BBRv3
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
@@ -232,7 +232,32 @@ jobs:
             exit 1
           fi
 
-          patch_url="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}/0002-bbr3.patch"
+          CACHYOS_BASE="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}"
+          PATCHES_APPLIED=0
+
+          # === CachyOS 基础性能补丁集（best-effort，失败不阻塞构建）===
+          # 包含：EEVDF 调度器改进、AMD P-State 优化、内存管理增强等
+          for patch_name in \
+            "0001-cachyos-base-all.patch" \
+            "0003-fixes.patch"; do
+            patch_url="${CACHYOS_BASE}/${patch_name}"
+            echo "尝试下载 CachyOS 补丁: ${patch_name}"
+            if curl -sfL --head "$patch_url" >/dev/null 2>&1; then
+              curl -fL --retry 3 --retry-delay 2 "$patch_url" -o "/tmp/${patch_name}"
+              if patch --forward --batch -p1 < "/tmp/${patch_name}"; then
+                echo "✅ ${patch_name} 应用成功"
+                PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
+              else
+                echo "⚠️ ${patch_name} 应用失败（可能与当前内核版本冲突），跳过"
+              fi
+            else
+              echo "ℹ️ ${patch_name} 尚未发布于内核 ${kernel_series}，跳过"
+            fi
+          done
+          echo "CachyOS 基础补丁：${PATCHES_APPLIED} 个应用成功"
+
+          # === BBRv3 补丁（必需）===
+          patch_url="${CACHYOS_BASE}/0002-bbr3.patch"
           echo "检查 BBRv3 补丁是否可用: $patch_url"
           if ! curl -sfL --head "$patch_url" >/dev/null 2>&1; then
             echo "::error::BBRv3 补丁尚未发布于内核版本 $kernel_series"
@@ -339,23 +364,99 @@ jobs:
           scripts/config --disable GAMEPORT
           scripts/config --disable ACCESSIBILITY
 
+          # ================================================================
+          # === 激进性能优化（Beta 实验性选项）===
+          # ================================================================
+
+          # --- [AGGRESSIVE] 禁用 CPU 漏洞缓解措施 ---
+          # ⚠️ 关闭 Spectre/Meltdown/MDS/SRSO 等全部硬件漏洞缓解
+          # 性能提升约 5-30%（取决于工作负载），仅适用于信任环境
+          scripts/config --disable CPU_MITIGATIONS
+
+          # --- [AGGRESSIVE] 降低最大 CPU 数量 8192→256 ---
+          # MAXSMP 强制 NR_CPUS=8192，VPS 完全不需要
+          # 减少 per-CPU 数据结构内存开销，加速启动
+          scripts/config --disable MAXSMP
+          scripts/config --set-val NR_CPUS 256
+
+          # --- [AGGRESSIVE] 时钟频率 250Hz→1000Hz ---
+          # 更高时钟 = 更低调度/网络延迟，代价是微量 CPU 开销
+          scripts/config --disable HZ_100
+          scripts/config --disable HZ_250
+          scripts/config --disable HZ_300
+          scripts/config --enable HZ_1000
+          scripts/config --set-val HZ 1000
+
+          # --- [AGGRESSIVE] 禁用 IA-32 兼容层 ---
+          # 纯 64 位 VPS 不需要运行 32 位程序
+          scripts/config --disable IA32_EMULATION
+          scripts/config --disable X86_X32_ABI
+
+          # --- 启用 BTF（eBPF CO-RE 必需，现代可观测性基础）---
+          # 需要 pahole（已在工具链步骤中安装最新版）
+          scripts/config --disable DEBUG_INFO_NONE
+          scripts/config --enable DEBUG_INFO
+          scripts/config --enable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          scripts/config --enable DEBUG_INFO_BTF
+          scripts/config --enable DEBUG_INFO_BTF_MODULES
+
+          # --- RCU 深度优化 ---
+          # 将 RCU 回调从所有 CPU 上卸载到专用线程（减少延迟尖峰）
+          scripts/config --enable RCU_NOCB_CPU_DEFAULT_ALL
+          # RCU Lazy 默认开启（批量处理回调，减少唤醒次数）
+          scripts/config --disable RCU_LAZY_DEFAULT_OFF
+
+          # --- TEO CPU 空闲管理器 ---
+          # Timer Events Oriented：比 menu 更智能地预测空闲时长
+          scripts/config --enable CPU_IDLE_GOV_TEO
+
+          # --- ZSWAP 独占负载模式 ---
+          # 从 zswap 读取的页面自动从 swap 后端删除（节省 I/O）
+          scripts/config --enable ZSWAP_EXCLUSIVE_LOADS_DEFAULT_ON
+
+          # --- 内核模块 ZSTD 压缩 ---
+          # 减少 /lib/modules 磁盘占用和模块加载时间
+          scripts/config --enable MODULE_COMPRESS_ZSTD
+          scripts/config --disable MODULE_COMPRESS_NONE
+
+          # --- Haltpoll CPU 空闲（虚拟化加速）---
+          # VM 中在 halt 前自旋等待，减少 VMEXIT 延迟
+          scripts/config --enable HALTPOLL_CPUIDLE
+
+          # --- 网络补充优化 ---
+          # TLS 内核卸载（VPS 用于反向代理加速）
+          scripts/config --module TLS
+          scripts/config --enable TLS_DEVICE
+          # MPTCP（多路径 TCP，提升网络弹性）
+          scripts/config --enable MPTCP
+          # XDP Sockets（高性能用户态包处理）
+          scripts/config --enable XDP_SOCKETS
+
+          # --- sched_ext（可加载外部调度器，实验特性）---
+          scripts/config --enable SCHED_CLASS_EXT
+
           make olddefconfig
 
           # 保存配置文件副本用于后续上传（bindeb-pkg 会改变目录结构）
           cp .config ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
           echo "=== 关键配置验证 ==="
-          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_SOUND=|CONFIG_DRM=|CONFIG_HYPERV=|CONFIG_MICROCODE=|CONFIG_PAGE_POOL_STATS=|CONFIG_ZSWAP_DEFAULT_ON=' .config || true
+          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_CPU_MITIGATIONS=|CONFIG_HZ=|CONFIG_NR_CPUS=|CONFIG_DEBUG_INFO_BTF=|CONFIG_IA32_EMULATION=|CONFIG_MODULE_COMPRESS_ZSTD=|CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=|CONFIG_ZSWAP_EXCLUSIVE_LOADS=|CONFIG_SCHED_CLASS_EXT=' .config || true
 
-          echo "=== 检查 olddefconfig 是否产生了意外变更 ==="
+          echo "=== 检查关键配置是否生效 ==="
           UNEXPECTED=0
           grep -q 'CONFIG_KERNEL_ZSTD=y' .config || { echo "::warning::CONFIG_KERNEL_ZSTD 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_NO_HZ_IDLE=y' .config || { echo "::warning::CONFIG_NO_HZ_IDLE 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=1; }
-          if [ $UNEXPECTED -eq 1 ]; then
-            echo "::warning::部分关键配置未生效，请检查基础配置文件是否需要更新"
+          grep -q 'CONFIG_DEBUG_INFO_BTF=y' .config || { echo "::warning::CONFIG_DEBUG_INFO_BTF 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_HZ=1000' .config || { echo "::warning::CONFIG_HZ=1000 未生效！"; UNEXPECTED=1; }
+          ! grep -q 'CONFIG_CPU_MITIGATIONS=y' .config || { echo "::warning::CPU_MITIGATIONS 未禁用！"; UNEXPECTED=1; }
+          if [ $UNEXPECTED -eq 0 ]; then
+            echo "✅ 全部关键配置验证通过"
+          else
+            echo "::warning::${UNEXPECTED} 项关键配置未生效，请检查基础配置文件"
           fi
 
       - name: 🏗️ 构建内核 Debian 包
@@ -372,9 +473,11 @@ jobs:
           BUILD_START=$(date +%s)
           # -pipe: 使用管道替代临时文件传递编译阶段数据
           # -j$(nproc): 充分利用所有 CPU 核心
+          # x86-64-v3: 启用 AVX2, BMI1/2, FMA, MOVBE 等现代指令集
+          # 要求 2013 年后的 CPU（Haswell+/Zen+），覆盖绝大多数云 VPS
           make bindeb-pkg -j$(nproc) \
             LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3-beta \
-            KCFLAGS="-pipe"
+            KCFLAGS="-march=x86-64-v3 -pipe"
           BUILD_END=$(date +%s)
           echo "编译耗时: $(( (BUILD_END - BUILD_START) / 60 )) 分 $(( (BUILD_END - BUILD_START) % 60 )) 秒"
           echo "ccache 命中统计:"
@@ -418,24 +521,43 @@ jobs:
           body: |
             ## 🧪 [Beta] Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
+            > ⚠️ **激进优化版本** — 禁用 CPU 漏洞缓解、x86-64-v3 指令集、1000Hz 时钟
+
             | 项目 | 值 |
             |---|---|
             | 内核版本 | ${{ env.KERNEL_VERSION }} |
             | 内核分支 | ${{ matrix.branch }} |
             | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
-            | 架构 | ${{ matrix.arch }} |
-            | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) (version-matched) |
+            | 架构 | ${{ matrix.arch }} (x86-64-v3, 需 Haswell+/Zen+) |
+            | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) |
+            | 性能补丁 | CachyOS base + fixes (best-effort) |
             | 拥塞控制 | BBRv3 (built-in) |
             | 默认 Qdisc | fq |
             | 定时器 | NO_HZ_IDLE |
-            | 抢占模型 | PREEMPT_LAZY |
-            | 时钟频率 | HZ=250 |
+            | 抢占模型 | PREEMPT_LAZY + PREEMPT_DYNAMIC |
+            | 时钟频率 | **HZ=1000** (低延迟) |
+            | 最大 CPU | 256 (降低自 8192) |
             | 内核压缩 | ZSTD |
-            | 编译优化 | ccache + GCC 15 + VPS 精简配置 |
+            | 模块压缩 | ZSTD |
+            | eBPF | BTF 已启用 (CO-RE) |
+            | CPU 缓解 | **已禁用** (性能优先) |
+            | 32 位兼容 | **已禁用** (纯 64 位) |
+            | 编译优化 | GCC 15 + ccache + `-march=x86-64-v3` |
+
+            ### 🚀 激进优化
+            - **CPU 漏洞缓解全部关闭** — Spectre/Meltdown/MDS/SRSO/GDS/RFDS/TAA 等，性能提升 5-30%
+            - **x86-64-v3 指令集** — AVX2, BMI1/2, FMA, MOVBE（需 2013+ CPU）
+            - **1000Hz 时钟** — 更低的调度和网络响应延迟
+            - **NR_CPUS=256** — 精简 per-CPU 结构，减少内存开销
+            - **RCU 优化** — NOCB_CPU_DEFAULT_ALL + RCU_LAZY 默认开启
+            - **BTF 调试信息** — 支持 bpftrace/bcc/libbpf 等现代可观测性工具
 
             ### 🔧 VPS 优化
-            - BPF JIT 始终开启、TCP-AO (RFC 5925)、PAGE_POOL_STATS、zswap 默认启用
-            - 禁用 ~30 个不必要的硬件驱动（声卡、物理显卡、WiFi、蓝牙、InfiniBand 等）
+            - BPF JIT 始终开启、TCP-AO (RFC 5925)、MPTCP、XDP Sockets
+            - PAGE_POOL_STATS、zswap(ZSTD+exclusive)、HALTPOLL_CPUIDLE
+            - TEO CPU 空闲管理、sched_ext 外部调度器支持
+            - 禁用 ~30 个不必要的硬件驱动 + 32 位兼容层
+            - CachyOS 社区性能补丁（调度器/内存/驱动修复）
 
             ### 🛠️ 工具链
-            - GCC 15.2、ccache (latest)、pahole (latest)、zstd (latest)、lz4 (latest)
+            - GCC 15 (latest)、ccache (latest)、pahole (latest)、zstd (latest)、lz4 (latest)

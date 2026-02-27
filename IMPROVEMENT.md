@@ -16,6 +16,9 @@ This fork introduces the following changes compared to [byJoey/Actions-bbr-v3](h
 | Build Cache | None | ccache (5 GB, compression, depend mode) |
 | Disk Space | No cleanup | Removes dotnet/Android/GHC toolchains before build |
 | Kernel Config | Base config only, no tuning | VPS-optimized: ZSTD, BPF JIT, TCP-AO, zswap, ~30 drivers stripped |
+| Aggressive Mode | N/A | CPU mitigations off, HZ=1000, NR_CPUS=256, x86-64-v3, BTF, IA32 off |
+| Performance Patches | None | CachyOS base + fixes patches (best-effort) + BBRv3 |
+| Build Optimization | N/A | GCC 15, `-march=x86-64-v3`, ccache, latest pahole/zstd/lz4 |
 | Workflow Cleanup | Third-party action (`delete-workflow-runs`) | Inline GitHub API calls (zero external dependency) |
 | Release Notes | One-line text | Structured table with config summary and install instructions |
 | Error Handling | Basic | `set -euo pipefail` throughout, config verification step |
@@ -53,6 +56,9 @@ This fork introduces the following changes compared to [byJoey/Actions-bbr-v3](h
 | 构建缓存 | 无 | ccache（5 GB，压缩，depend 模式） |
 | 磁盘空间 | 无清理 | 构建前删除 dotnet/Android/GHC 工具链 |
 | 内核配置 | 仅基础配置 | VPS 优化：ZSTD、BPF JIT、TCP-AO、zswap、精简 ~30 个驱动 |
+| 激进模式 | 无 | CPU 缓解关闭、HZ=1000、NR_CPUS=256、x86-64-v3、BTF、IA32 关闭 |
+| 性能补丁 | 无 | CachyOS base + fixes 补丁 (best-effort) + BBRv3 |
+| 编译优化 | 无 | GCC 15、`-march=x86-64-v3`、ccache、最新 pahole/zstd/lz4 |
 | 工作流清理 | 第三方 Action (`delete-workflow-runs`) | 内联 GitHub API（零外部依赖） |
 | Release 说明 | 单行文本 | 结构化表格，含配置摘要和安装说明 |
 | 错误处理 | 基础 | 全程 `set -euo pipefail`，配置验证步骤 |
