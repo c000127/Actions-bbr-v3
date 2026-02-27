@@ -1,4 +1,4 @@
-name: 构建带有BBRv3的内核
+name: 构建 VPS 优化的 BBRv3 内核
 
 on:
   workflow_dispatch:
@@ -314,12 +314,16 @@ jobs:
             | 内核版本 | ${{ env.KERNEL_VERSION }} |
             | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
             | 架构 | ${{ matrix.arch }} |
+            | BBR 补丁 | CachyOS community patch (version-matched) |
             | 拥塞控制 | BBRv3 (built-in) |
             | 默认 Qdisc | fq |
-            | 定时器频率 | 250 HZ |
-            | 抢占模型 | PREEMPT_LAZY |
+            | 定时器 | NO_HZ_IDLE |
             | 内核压缩 | ZSTD |
             | 编译优化 | ccache + VPS 精简配置 |
+
+            ### 🔧 VPS 优化
+            - BPF JIT 始终开启、TCP-AO (RFC 5925)、PAGE_POOL_STATS、zswap 默认启用
+            - 禁用 ~30 个不必要的硬件驱动（声卡、物理显卡、WiFi、蓝牙、InfiniBand 等）
 
             ### 📦 安装方式
             ```bash
