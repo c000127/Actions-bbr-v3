@@ -103,9 +103,10 @@ jobs:
         with:
           path: ${{ github.workspace }}/.ccache
           # 每次构建使用唯一 key（附加 run_id），确保更新后的缓存能被保存
-          # 恢复时按主版本号前缀匹配最近一次缓存
-          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ github.run_id }}
+          # 恢复时按 arch+series+branch 前缀匹配最近一次缓存
+          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
           restore-keys: |
+            ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
             ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
             ccache-${{ matrix.arch }}-
 
