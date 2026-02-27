@@ -404,10 +404,9 @@ jobs:
           # === 激进性能优化（Beta 实验性选项）===
           # ================================================================
 
-          # --- [AGGRESSIVE] 禁用 CPU 漏洞缓解措施 ---
-          # ⚠️ 关闭 Spectre/Meltdown/MDS/SRSO 等全部硬件漏洞缓解
-          # 性能提升约 5-30%（取决于工作负载），仅适用于信任环境
-          scripts/config --disable CPU_MITIGATIONS
+          # --- CPU 漏洞缓解措施 ---
+          # 保持默认开启，确保 Spectre/Meltdown/MDS/SRSO 等缓解生效
+          scripts/config --enable CPU_MITIGATIONS
 
           # --- [AGGRESSIVE] 降低最大 CPU 数量 8192→256 ---
           # MAXSMP 强制 NR_CPUS=8192，VPS 完全不需要
@@ -488,7 +487,7 @@ jobs:
           grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_DEBUG_INFO_BTF=y' .config || { echo "::warning::CONFIG_DEBUG_INFO_BTF 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_HZ=1000' .config || { echo "::warning::CONFIG_HZ=1000 未生效！"; UNEXPECTED=1; }
-          ! grep -q 'CONFIG_CPU_MITIGATIONS=y' .config || { echo "::warning::CPU_MITIGATIONS 未禁用！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_CPU_MITIGATIONS=y' .config || { echo "::warning::CPU_MITIGATIONS 未启用！"; UNEXPECTED=1; }
           if [ $UNEXPECTED -eq 0 ]; then
             echo "✅ 全部关键配置验证通过"
           else
@@ -539,21 +538,21 @@ jobs:
           name: deb-${{ matrix.arch }}-${{ matrix.branch }}
           path: ./kernel/linux-*.deb
 
-      - name: 🧹 清理已有 Release 资源
+      - name: 🧹 删除已有 Release（避免 asset 同名冲突）
         run: |
           TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta"
-          RELEASE=$(curl -sf \
+          RELEASE_ID=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}") || true
-          if [[ -n "$RELEASE" ]]; then
-            echo "$RELEASE" | jq -r '.assets[].id' | while read asset_id; do
-              curl -sf -X DELETE \
-                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository }}/releases/assets/${asset_id}"
-              echo "已删除 asset $asset_id"
-            done
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
+            | jq -r '.id') || true
+          if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
+            echo "删除已有 Release: ${TAG} (id=${RELEASE_ID})"
+            curl -sf -X DELETE \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}"
+            echo "✅ 已删除"
           fi
 
       - name: 🎉 发布到 GitHub Release
@@ -565,7 +564,7 @@ jobs:
           body: |
             ## 🧪 [Beta] Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
-            > ⚠️ **激进优化版本** — 禁用 CPU 漏洞缓解、x86-64-v3 指令集、1000Hz 时钟
+            > ⚠️ **激进优化版本** — x86-64-v3 指令集、1000Hz 时钟
 
             | 项目 | 值 |
             |---|---|
@@ -584,12 +583,12 @@ jobs:
             | 内核压缩 | ZSTD |
             | 模块压缩 | ZSTD |
             | eBPF | BTF 已启用 (CO-RE) |
-            | CPU 缓解 | **已禁用** (性能优先) |
+            | CPU 缓解 | **已启用** (安全优先) |
             | 32 位兼容 | **已禁用** (纯 64 位) |
             | 编译优化 | GCC 15 + ccache + `-march=x86-64-v3` |
 
             ### 🚀 激进优化
-            - **CPU 漏洞缓解全部关闭** — Spectre/Meltdown/MDS/SRSO/GDS/RFDS/TAA 等，性能提升 5-30%
+            - **CPU 漏洞缓解已开启** — Spectre/Meltdown/MDS/SRSO/GDS/RFDS/TAA 等安全补丁生效
             - **x86-64-v3 指令集** — AVX2, BMI1/2, FMA, MOVBE（需 2013+ CPU）
             - **1000Hz 时钟** — 更低的调度和网络响应延迟
             - **NR_CPUS=256** — 精简 per-CPU 结构，减少内存开销
@@ -617,7 +616,7 @@ jobs:
             ### ⚠️ 注意
             - 仅适用于 Debian 11+ / Ubuntu 20.04+ 系统
             - 需要 Haswell+/Zen+ 以上 CPU（支持 x86-64-v3 指令集）
-            - CPU 漏洞缓解已禁用，仅建议在可信环境中使用
+            - CPU 漏洞缓解已启用，可在任意环境中安全使用
             - 安装后需重启生效
 
             ### �🛠️ 工具链
