@@ -301,6 +301,14 @@ jobs:
           echo "ccache 命中统计:"
           ccache -s || true
 
+          # 清理不需要上传的包：
+          #   -dbg: 调试符号包，可能超出 GitHub release 2GB 上限
+          #   linux-libc-dev: C 库头文件，运行时不需要
+          cd ${{ github.workspace }}/kernel
+          rm -fv linux-image-*-dbg_*.deb linux-libc-dev_*.deb
+          echo "最终上传的 .deb 文件："
+          ls -lh linux-*.deb
+
       - name: 📤 上传配置文件
         uses: actions/upload-artifact@v4
         with:
