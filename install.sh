@@ -267,8 +267,12 @@ install_latest_version() {
     CORE_LATEST_NORMALIZED=$(normalize_version "$CORE_LATEST_VERSION")
 
     if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$CORE_LATEST_NORMALIZED" ]]; then
-        echo -e "\033[1;32m(o'▽'o) 您已安装最新版本，无需更新！\033[0m"
-        return 0
+        echo -e "\033[1;32m(o'▽'o) 您已安装最新版本！\033[0m"
+        echo -n -e "\033[36m是否仍要重新安装（例如内核已重新编译）？(y/n): \033[0m"
+        read -r REINSTALL
+        if [[ "$REINSTALL" != "y" && "$REINSTALL" != "Y" ]]; then
+            return 0
+        fi
     fi
 
     echo -e "\033[33m准备下载新版本...\033[0m"
