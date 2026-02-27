@@ -82,8 +82,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/
 
 ---
 
----
-
 ### 🌟 功能列表  
 
 👑 **一键安装 BBR v3 内核（支持 mainline / RC / stable）**  
