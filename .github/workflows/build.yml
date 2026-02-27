@@ -305,6 +305,23 @@ jobs:
           name: deb-${{ matrix.arch }}
           path: ./kernel/linux-*.deb
 
+      - name: 🧹 清理已有 Release 资源
+        run: |
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_BRANCH }}"
+          RELEASE=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}") || true
+          if [[ -n "$RELEASE" ]]; then
+            echo "$RELEASE" | jq -r '.assets[].id' | while read asset_id; do
+              curl -sf -X DELETE \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/assets/${asset_id}"
+              echo "已删除 asset $asset_id"
+            done
+          fi
+
       - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
