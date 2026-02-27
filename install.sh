@@ -226,7 +226,7 @@ install_packages() {
 # 函数：检查并安装最新版本
 install_latest_version() {
     echo -e "\033[36m正在从 GitHub 获取最新版本信息...\033[0m"
-    BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases"
+    BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
     RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
     if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
         echo -e "\033[31m从 GitHub 获取版本信息失败。请检查网络连接或 API 状态。\033[0m"
@@ -237,7 +237,7 @@ install_latest_version() {
     [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
     [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
 
-    LATEST_TAG_NAME=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" 'map(select(.tag_name | test($filter; "i"))) | sort_by(.published_at) | .[-1].tag_name')
+    LATEST_TAG_NAME=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" '[.[] | select(.tag_name | test($filter; "i"))][0].tag_name')
 
     if [[ -z "$LATEST_TAG_NAME" || "$LATEST_TAG_NAME" == "null" ]]; then
         echo -e "\033[31m未找到适合当前架构 ($ARCH) 的最新版本。\033[0m"
@@ -275,7 +275,7 @@ install_latest_version() {
 
 # 函数：安装指定版本
 install_specific_version() {
-    BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases"
+    BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
     RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
     if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
         echo -e "\033[31m从 GitHub 获取版本信息失败。请检查网络连接或 API 状态。\033[0m"
