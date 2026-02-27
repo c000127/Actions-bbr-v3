@@ -190,6 +190,9 @@ get_installed_branch() {
     ver=$(get_installed_version)
     if [[ -z "$ver" ]]; then
         echo ""
+    elif [[ "$ver" == *"-beta"* ]]; then
+        # beta 判断必须在 mainline/stable 之前，因为 beta tag 包含 mainline 字样
+        echo "beta"
     elif [[ "$ver" == *"-mainline"* ]]; then
         echo "mainline"
     elif [[ "$ver" == *"-stable"* ]]; then
@@ -207,14 +210,19 @@ select_branch() {
     echo -e "\033[36m    每 9-10 周发布新版本。适合追求最新功能的用户。\033[0m"
     echo -e "\033[36m  Stable（稳定）：基于主线的稳定分支，仅包含从主线回移的 Bug 修复。\033[0m"
     echo -e "\033[36m    按需发布（通常每周一次），更注重可靠性和稳定性。\033[0m"
+    echo -e "\033[36m  Beta（测试）：基于主线的激进优化版本，包含 CachyOS 性能补丁。\033[0m"
+    echo -e "\033[36m    禁用 CPU 漏洞缓解、x86-64-v3 指令集、1000Hz、BTF、纯 64 位。\033[0m"
+    echo -e "\033[31m    ⚠️ Beta 版本仅适合测试，需为性能牺牲安全性（已关闭漏洞缓解）\033[0m"
     echo ""
     echo -e "\033[33m 1. Mainline（主线）\033[0m"
     echo -e "\033[33m 2. Stable（稳定）\033[0m"
-    echo -n -e "\033[36m请选择 (1-2): \033[0m"
+    echo -e "\033[33m 3. Beta（测试 - 激进优化）\033[0m"
+    echo -n -e "\033[36m请选择 (1-3): \033[0m"
     read -r branch_choice
     case "$branch_choice" in
         1) SELECTED_BRANCH="mainline" ;;
         2) SELECTED_BRANCH="stable" ;;
+        3) SELECTED_BRANCH="beta" ;;
         *)
             echo -e "\033[31m无效选择，操作取消。\033[0m"
             SELECTED_BRANCH=""
@@ -293,8 +301,19 @@ install_latest_version() {
     [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
     [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
 
-    LATEST_TAG_NAME=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$SELECTED_BRANCH" \
-        '[.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch; "i"))][0].tag_name')
+    # 构建 tag 匹配正则：
+    #   mainline: 包含 "mainline" 且不包含 "beta"
+    #   stable:   包含 "stable" 且不包含 "beta"
+    #   beta:     包含 "beta"
+    local TAG_REGEX
+    if [[ "$SELECTED_BRANCH" == "beta" ]]; then
+        TAG_REGEX="beta"
+    else
+        TAG_REGEX="${SELECTED_BRANCH}(?!.*beta)"
+    fi
+
+    LATEST_TAG_NAME=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$TAG_REGEX" \
+        '[.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch))][0].tag_name')
 
     if [[ -z "$LATEST_TAG_NAME" || "$LATEST_TAG_NAME" == "null" ]]; then
         echo -e "\033[31m未找到适合当前架构 ($ARCH) 的 ${SELECTED_BRANCH} 分支最新版本。\033[0m"
@@ -349,8 +368,16 @@ install_specific_version() {
     [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
     [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
     
-    MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$SELECTED_BRANCH" \
-        '.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch; "i")) | .tag_name')
+    # 构建 tag 匹配正则（与 install_latest_version 相同逻辑）
+    local TAG_REGEX
+    if [[ "$SELECTED_BRANCH" == "beta" ]]; then
+        TAG_REGEX="beta"
+    else
+        TAG_REGEX="${SELECTED_BRANCH}(?!.*beta)"
+    fi
+
+    MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$TAG_REGEX" \
+        '.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch)) | .tag_name')
 
     if [[ -z "$MATCH_TAGS" ]]; then
         echo -e "\033[31m未找到适合当前架构的 ${SELECTED_BRANCH} 分支版本。\033[0m"
@@ -421,6 +448,7 @@ if [[ -n "$INSTALLED_BBR_VER" ]]; then
     case "$INSTALLED_BRANCH" in
         mainline) BRANCH_LABEL="Mainline 主线" ;;
         stable) BRANCH_LABEL="Stable 稳定" ;;
+        beta) BRANCH_LABEL="Beta 测试 ⚠️" ;;
         *) BRANCH_LABEL="未知分支" ;;
     esac
     echo -e "\033[36mBBR 内核：\033[0m\033[1;32m${INSTALLED_BBR_VER} ✔ (${BRANCH_LABEL})\033[0m"
@@ -442,7 +470,9 @@ echo -e "\033[33m 6. ⚡ 启用 BBR + FQ_PIE\033[0m"
 echo -e "\033[33m 7. ⚡ 启用 BBR + CAKE\033[0m"
 echo -e "\033[33m 8. 🗑️  卸载 BBR 内核\033[0m"
 print_separator
-echo -n -e "\033[36m请选择一个操作 (1-8) (｡･ω･｡): \033[0m"
+echo -e "\033[33m 9. 🛠️  查看已安装内核版本类型\033[0m"
+print_separator
+echo -n -e "\033[36m请选择一个操作 (1-9) (｡・ω・｡): \033[0m"
 read -r ACTION
 
 case "$ACTION" in
@@ -522,7 +552,43 @@ case "$ACTION" in
             echo -e "\033[33m未找到由本脚本安装的 '$KERNEL_BRAND' 内核包。\033[0m"
         fi
         ;;
+    9)
+        echo -e "\033[1;32m(•̀ᴗ•́) 内核版本详情\033[0m"
+        INSTALLED_VER=$(get_installed_version)
+        INSTALLED_BR=$(get_installed_branch)
+        echo ""
+        if [[ -z "$INSTALLED_VER" ]]; then
+            echo -e "\033[33m未检测到由本脚本安装的 BBR 内核。\033[0m"
+        else
+            echo -e "\033[36m已安装版本：\033[0m\033[1;32m$INSTALLED_VER\033[0m"
+            case "$INSTALLED_BR" in
+                mainline)
+                    echo -e "\033[36m版本类型：\033[0m\033[1;32mMainline（主线）\033[0m"
+                    echo -e "\033[36m  特点：标准编译，保留 CPU 漏洞缓解，安全优先\033[0m"
+                    ;;
+                stable)
+                    echo -e "\033[36m版本类型：\033[0m\033[1;32mStable（稳定）\033[0m"
+                    echo -e "\033[36m  特点：稳定分支，仅包含 Bug 修复\033[0m"
+                    ;;
+                beta)
+                    echo -e "\033[36m版本类型：\033[0m\033[1;31mBeta（测试 - 激进优化）\033[0m"
+                    echo -e "\033[36m  特点：\033[0m"
+                    echo -e "\033[33m    ⚠️  CPU 漏洞缓解已禁用（性能 +5-30%，安全性降低）\033[0m"
+                    echo -e "\033[33m    🚀 x86-64-v3 指令集（需 Haswell+/Zen+ CPU）\033[0m"
+                    echo -e "\033[33m    ⏱️  HZ=1000 低延迟时钟\033[0m"
+                    echo -e "\033[33m    📊 BTF/eBPF CO-RE 可观测性\033[0m"
+                    echo -e "\033[33m    🚫 纯 64 位（无 IA-32 兼容层）\033[0m"
+                    echo -e "\033[33m    🧩 CachyOS 性能补丁\033[0m"
+                    ;;
+                *)
+                    echo -e "\033[36m版本类型：\033[0m\033[33m未知\033[0m"
+                    ;;
+            esac
+        fi
+        echo ""
+        echo -e "\033[36m当前运行内核：\033[0m\033[1;32m$(uname -r)\033[0m"
+        ;;
     *)
-        echo -e "\033[31m(￣▽￣)ゞ 无效的选项，请输入 1-8 之间的数字哦~\033[0m"
+        echo -e "\033[31m(￣▽￣)ゞ 无效的选项，请输入 1-9 之间的数字哦~\033[0m"
         ;;
 esac
