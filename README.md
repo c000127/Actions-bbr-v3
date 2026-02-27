@@ -47,6 +47,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/refs/
 | Default Qdisc | fq | Optimal pairing with BBR |
 | Kernel Compression | ZSTD | 3x faster compression than XZ, faster decompression |
 | Timer | NO_HZ_IDLE | Lower overhead than NO_HZ_FULL, ideal for VPS |
+| Preemption | PREEMPT_LAZY | New in 7.0, balances latency and throughput |
+| Timer Frequency | HZ=250 | Good balance for VPS (low overhead, adequate responsiveness) |
 | BPF JIT | Always-on | Improved BPF networking performance |
 | TCP-AO | Enabled | RFC 5925, modern datacenter authentication |
 | zswap | Default on | Compressed swap cache for VPS memory optimization |
