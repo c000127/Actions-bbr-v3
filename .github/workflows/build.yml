@@ -174,8 +174,8 @@ jobs:
           scripts/config --enable TCP_AO
           # 启用 PAGE_POOL 统计，便于网络性能监控
           scripts/config --enable PAGE_POOL_STATS
-          # 同时支持 Intel 和 AMD 微码加载（VPS 可能运行在 AMD 主机上）
-          scripts/config --enable MICROCODE_AMD
+          # 确保微码加载已启用（7.0 合并了 Intel/AMD 为统一 MICROCODE 选项）
+          scripts/config --enable MICROCODE
 
           # === VPS 内存优化 ===
           # 默认启用 zswap 压缩交换缓存
@@ -232,7 +232,7 @@ jobs:
           cp .config ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
           echo "=== 关键配置验证 ==="
-          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_SOUND=|CONFIG_DRM=|CONFIG_HYPERV=|CONFIG_MICROCODE_AMD=|CONFIG_PAGE_POOL_STATS=|CONFIG_ZSWAP_DEFAULT_ON=' .config || true
+          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_SOUND=|CONFIG_DRM=|CONFIG_HYPERV=|CONFIG_MICROCODE=|CONFIG_PAGE_POOL_STATS=|CONFIG_ZSWAP_DEFAULT_ON=' .config || true
 
           echo "=== 检查 olddefconfig 是否产生了意外变更 ==="
           UNEXPECTED=0
@@ -240,7 +240,7 @@ jobs:
           grep -q 'CONFIG_NO_HZ_IDLE=y' .config || { echo "::warning::CONFIG_NO_HZ_IDLE 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_MICROCODE_AMD=y' .config || { echo "::warning::CONFIG_MICROCODE_AMD 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=1; }
           if [ $UNEXPECTED -eq 1 ]; then
             echo "::warning::部分关键配置未生效，请检查基础配置文件是否需要更新"
           fi
@@ -290,8 +290,8 @@ jobs:
             | 架构 | ${{ matrix.arch }} |
             | 拥塞控制 | BBRv3 (built-in) |
             | 默认 Qdisc | fq |
-            | 定时器频率 | 1000 HZ |
-            | 抢占模型 | Voluntary |
+            | 定时器频率 | 250 HZ |
+            | 抢占模型 | PREEMPT_LAZY |
             | 内核压缩 | ZSTD |
             | 编译优化 | ccache + VPS 精简配置 |
 
