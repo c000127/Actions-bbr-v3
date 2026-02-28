@@ -225,8 +225,6 @@ jobs:
           key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
           restore-keys: |
             ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
-            ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
-            ccache-${{ matrix.arch }}-
 
       - name: ⬇️ 下载内核源代码
         run: |
