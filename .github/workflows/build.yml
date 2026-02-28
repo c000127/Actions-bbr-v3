@@ -35,12 +35,12 @@ jobs:
       - name: 🗑️ 释放磁盘空间 + 删除旧工作流
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache &
-          # 并行删除旧工作流运行记录（best-effort，不阻塞构建）
+          # 并行删除当前工作流的旧运行记录（best-effort，不阻塞构建）
           curl -sf -X GET \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=50&status=completed" \
-          | jq -r '.workflow_runs[].id' 2>/dev/null | while read run_id; do
+          | jq -r --arg wf "${{ github.workflow }}" '.workflow_runs[] | select(.name == $wf) | .id' 2>/dev/null | while read run_id; do
             curl -sf -X DELETE \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
