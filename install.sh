@@ -536,9 +536,10 @@ if [[ -n "$INSTALLED_BBR_VER" ]]; then
         beta) BRANCH_LABEL="Beta 测试 ⚠️" ;;
         *) BRANCH_LABEL="未知分支" ;;
     esac
-    echo -e "\033[36m内核：\033[0m\033[1;32m${INSTALLED_BBR_VER} ✔ (${BRANCH_LABEL})\033[0m"
+    echo -e "\033[36m内核版本：\033[0m\033[1;32m${INSTALLED_BBR_VER}\033[0m"
+    echo -e "\033[36m内核分支：\033[0m\033[1;32m${BRANCH_LABEL}\033[0m"
 else
-    echo -e "\033[36m内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m\033[33m（未安装优化内核）\033[0m"
+    echo -e "\033[36m运行内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m\033[33m（未安装优化内核）\033[0m"
 fi
 echo -e "\033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
 print_separator
@@ -570,10 +571,12 @@ case "$ACTION" in
     1)
         echo -e "\033[1;32m٩(｡•́‿•̀｡)۶ 您选择了安装或更新内核！\033[0m"
         install_latest_version
+        continue
         ;;
     2)
         echo -e "\033[1;32m(｡･∀･)ﾉﾞ 您选择了手动选择版本安装！\033[0m"
         install_specific_version
+        continue
         ;;
     3)
         echo -e "\033[1;32m(｡･ω･｡) 检查是否为 BBR v3...\033[0m"
