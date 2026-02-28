@@ -201,15 +201,15 @@ get_installed_branch() {
 # 函数：选择内核分支（结果保存在 SELECTED_BRANCH 变量中）
 select_branch() {
     echo ""
-    echo -e "\033[1;33m请选择内核分支：\033[0m"
-    echo -e "\033[36m  Mainline（主线）：由 Linus Torvalds 维护，包含所有最新特性和开发成果。\033[0m"
-    echo -e "\033[36m    每 9-10 周发布新版本。适合追求最新功能的用户。\033[0m"
-    echo -e "\033[36m  Stable（稳定）：基于主线的稳定分支，仅包含从主线回移的 Bug 修复。\033[0m"
-    echo -e "\033[36m    按需发布（通常每周一次），更注重可靠性和稳定性。\033[0m"
-    echo -e "\033[36m  Beta（测试）：基于主线的激进优化版本，包含 CachyOS 性能补丁。\033[0m"
-    echo -e "\033[36m    已启用 CPU 漏洞缓解、x86-64-v3 指令集、1000Hz、BTF、纯 64 位。\033[0m"
-    echo -e "\033[31m    ⚠️ Beta 版本为实验性激进优化，建议在测试环境中使用\033[0m"
-    echo ""
+    echo -e "\033[34m──────────── \033[1;33m选择内核分支 \033[0m\033[34m────────────\033[0m"
+    echo -e "\033[1;32m  Mainline（主线）\033[0m"
+    echo -e "\033[36m    Linus Torvalds 维护 | 最新特性 | 每 9-10 周发布\033[0m"
+    echo -e "\033[1;32m  Stable（稳定）\033[0m"
+    echo -e "\033[36m    Bug 修复回移 | 高可靠性 | 每周发布\033[0m"
+    echo -e "\033[1;31m  Beta（测试 - 激进优化）\033[0m"
+    echo -e "\033[36m    CachyOS 补丁 | CPU 漏洞缓解 | x86-64-v3 | HZ=1000\033[0m"
+    echo -e "\033[36m    BTF/eBPF | 纯 64 位 | ⚠️ 建议测试环境使用\033[0m"
+    echo -e "\033[34m─────────────────────────────────────\033[0m"
     echo -e "\033[33m 1. Mainline（主线）\033[0m"
     echo -e "\033[33m 2. Stable（稳定）\033[0m"
     echo -e "\033[33m 3. Beta（测试 - 激进优化）\033[0m"
@@ -585,7 +585,6 @@ case "$ACTION" in
         INSTALLED_VER=$(get_installed_version)
         INSTALLED_BR=$(get_installed_branch)
         echo -e "\033[34m──────────── \033[1;33m📋 内核信息 \033[0m\033[34m────────────\033[0m"
-        local RUNNING_VER
         RUNNING_VER=$(uname -r)
         if [[ -z "$INSTALLED_VER" ]]; then
             echo -e "\033[36m  运行内核：\033[0m\033[1;32m$RUNNING_VER\033[0m"
