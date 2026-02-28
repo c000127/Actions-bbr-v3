@@ -409,9 +409,9 @@ install_latest_version() {
     install_packages
 }
 
-# 函数：安装指定版本
+# 函数：手动选择分支和版本安装（先选分支，再选版本，最后确认）
 install_specific_version() {
-    smart_select_branch || return 1
+    select_branch || return 1
 
     BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
     RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
@@ -473,6 +473,28 @@ install_specific_version() {
     local selected_ver="${SELECTED_TAG#${ARCH_FILTER}-}"
     echo -e "\033[36m已选择版本：\033[0m\033[1;32m$selected_ver\033[0m"
 
+    # 检查是否切换分支，需二次确认
+    local INSTALLED_BRANCH
+    INSTALLED_BRANCH=$(get_installed_branch)
+    if [[ -n "$INSTALLED_BRANCH" && "$INSTALLED_BRANCH" != "unknown" && "$INSTALLED_BRANCH" != "$SELECTED_BRANCH" ]]; then
+        local BRANCH_DISPLAY
+        case "$INSTALLED_BRANCH" in
+            mainline) BRANCH_DISPLAY="Mainline 主线" ;;
+            stable) BRANCH_DISPLAY="Stable 稳定" ;;
+            beta) BRANCH_DISPLAY="Beta 测试" ;;
+            *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
+        esac
+        echo ""
+        echo -e "\033[31m⚠️ 您正在从 ${BRANCH_DISPLAY} 切换到 ${SELECTED_BRANCH} 分支\033[0m"
+        echo -e "\033[33m   切换分支会卸载当前内核，安装新分支的内核。\033[0m"
+        echo -n -e "\033[36m确认切换？(y/n): \033[0m"
+        read -r confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo -e "\033[33m已取消操作。\033[0m"
+            return 0
+        fi
+    fi
+
     ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$SELECTED_TAG" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
     
     rm -f "$DOWNLOAD_DIR"/linux-*.deb
@@ -511,9 +533,9 @@ if [[ -n "$INSTALLED_BBR_VER" ]]; then
         beta) BRANCH_LABEL="Beta 测试 ⚠️" ;;
         *) BRANCH_LABEL="未知分支" ;;
     esac
-    echo -e "\033[36mBBR 内核：\033[0m\033[1;32m${INSTALLED_BBR_VER} ✔ (${BRANCH_LABEL})\033[0m"
+    echo -e "\033[36m已安装：  \033[0m\033[1;32m${INSTALLED_BBR_VER} ✔ (${BRANCH_LABEL})\033[0m"
 else
-    echo -e "\033[36mBBR 内核：\033[0m\033[33m未安装\033[0m"
+    echo -e "\033[36m已安装：  \033[0m\033[33m未安装优化内核\033[0m"
 fi
 echo -e "\033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
 print_separator
@@ -521,14 +543,14 @@ echo -e "\033[1;33m作者：C000127  |  Fork of byJoey/Actions-bbr-v3"
 print_separator
 
 echo -e "\033[1;33m╭( ･ㅂ･)و ✧ 你可以选择以下操作哦：\033[0m"
-echo -e "\033[33m 1. 🚀 安装或更新 BBR v3 (选择分支，安装最新版)\033[0m"
+echo -e "\033[33m 1. 🚀 安装或更新 VPS 优化内核 (选择分支，安装最新版)\033[0m"
 echo -e "\033[33m 2. 📚 手动选择分支和版本安装\033[0m"
 echo -e "\033[33m 3. 🔍 检查 BBR v3 状态\033[0m"
 echo -e "\033[33m 4. ⚡ 启用 BBR + FQ\033[0m"
 echo -e "\033[33m 5. ⚡ 启用 BBR + FQ_CODEL\033[0m"
 echo -e "\033[33m 6. ⚡ 启用 BBR + FQ_PIE\033[0m"
 echo -e "\033[33m 7. ⚡ 启用 BBR + CAKE\033[0m"
-echo -e "\033[33m 8. 🗑️  卸载 BBR 内核\033[0m"
+echo -e "\033[33m 8. 🗑️  卸载优化内核\033[0m"
 print_separator
 echo -e "\033[33m 9. 🛠️  查看已安装内核版本类型\033[0m"
 print_separator
@@ -537,11 +559,11 @@ read -r ACTION
 
 case "$ACTION" in
     1)
-        echo -e "\033[1;32m٩(｡•́‿•̀｡)۶ 您选择了安装或更新 BBR v3！\033[0m"
+        echo -e "\033[1;32m٩(｡•́‿•̀｡)۶ 您选择了安装或更新内核！\033[0m"
         install_latest_version
         ;;
     2)
-        echo -e "\033[1;32m(｡･∀･)ﾉﾞ 您选择了安装指定版本的 BBR！\033[0m"
+        echo -e "\033[1;32m(｡･∀･)ﾉﾞ 您选择了手动选择版本安装！\033[0m"
         install_specific_version
         ;;
     3)
