@@ -203,7 +203,7 @@ jobs:
           ccache --set-config=compiler_check=content
           # 启用压缩，节省缓存空间（level 1 几乎不影响速度）
           ccache --set-config=compression=true
-          ccache --set-config=compression_level=1
+          ccache --set-config=compression_level=6
           # depend 模式：跳过预处理阶段直接使用依赖信息，大幅提升缓存命中
           ccache --set-config=depend_mode=true
           # 宽松匹配：忽略 __FILE__、时间戳、include_file 等宏差异
