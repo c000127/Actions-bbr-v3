@@ -18,15 +18,9 @@ jobs:
           - arch: x86_64
             runs_on: ubuntu-latest
             branch: mainline
-          - arch: x86_64
-            runs_on: ubuntu-latest
-            branch: stable
-          #- arch: arm64
-          #  runs_on: ubuntu-24.04-arm
-          #  branch: mainline
-          #- arch: arm64
-          #  runs_on: ubuntu-24.04-arm
-          #  branch: stable
+          # - arch: arm64
+          #   runs_on: ubuntu-24.04-arm
+          #   branch: mainline
     runs-on: ${{ matrix.runs_on }}
     env:
       ARCH: ${{ matrix.arch }}
@@ -35,11 +29,12 @@ jobs:
       - name: 🗑️ 释放磁盘空间 + 删除旧工作流
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache &
-          # 并行删除旧工作流运行记录（best-effort，不阻塞构建）
+          # 并行删除本工作流的旧运行记录（best-effort，不阻塞构建）
+          # 使用 workflow_id 筛选，避免误删其他工作流（如 build.yml）的记录
           curl -sf -X GET \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=50&status=completed" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build_test.yml/runs?per_page=50&status=completed" \
           | jq -r '.workflow_runs[].id' 2>/dev/null | while read run_id; do
             curl -sf -X DELETE \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -71,23 +66,134 @@ jobs:
       - name: 📥 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 🔧 安装构建依赖
+      - name: 🔧 安装构建依赖（最新版工具链）
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          FAIL_COUNT=0
+          GH_API="Authorization: Bearer ${GH_TOKEN}"
+
+          # 辅助函数：获取 GitHub 最新 release tag（去掉 v 前缀）
+          gh_latest() {
+            curl -sf -H "${GH_API}" "https://api.github.com/repos/$1/releases/latest" | jq -r .tag_name | tr -d 'v'
+          }
+
+          # ===== 1. GCC 15（最新版编译器）=====
+          echo "===== [1/5] GCC 15 ====="
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update -qq
+          # 不安装 cmake（系统自带 3.31.6，apt 仓库只有 3.28.3 会降级）
           sudo apt-get install -y --no-install-recommends \
+            gcc-15 g++-15 \
             git build-essential ccache \
             libncurses-dev libssl-dev libelf-dev libdw-dev \
             bison bc flex rsync debhelper \
             dpkg-dev fakeroot kmod cpio dwarves \
             lz4 zstd xz-utils curl jq patch
+          # 设置 GCC 15 为默认编译器
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 150 \
+            --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
+            --slave /usr/bin/gcov gcov /usr/bin/gcov-15
+          echo "✅ GCC 15 安装完成: $(gcc-15 --version | head -1)"
+
+          # ===== 2. ccache（最新版编译缓存）=====
+          echo "===== [2/5] ccache ====="
+          if CCACHE_VER=$(gh_latest ccache/ccache) && [ -n "${CCACHE_VER}" ]; then
+            echo "升级 ccache → ${CCACHE_VER}"
+            mkdir -p /tmp/ccache-install
+            if curl -fL "https://github.com/ccache/ccache/releases/download/v${CCACHE_VER}/ccache-${CCACHE_VER}-linux-$(uname -m).tar.xz" \
+              -o /tmp/ccache.tar.xz; then
+              tar -xJf /tmp/ccache.tar.xz -C /tmp/ccache-install --strip-components=1
+              sudo install -m 755 /tmp/ccache-install/ccache /usr/bin/ccache
+              for prog in gcc g++ cc c++ gcc-15 g++-15; do
+                sudo ln -sf /usr/bin/ccache "/usr/lib/ccache/${prog}"
+              done
+              echo "✅ ccache 升级完成: $(ccache --version | head -1)"
+            else
+              echo "⚠️ ccache 二进制下载失败，保留 apt 版本"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          else
+            echo "⚠️ 无法获取 ccache 最新版本号，保留 apt 版本"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          fi
+
+          # ===== 3. pahole/dwarves（最新版 BTF 生成工具）=====
+          echo "===== [3/5] pahole/dwarves ====="
+          # acmel/dwarves 没有 GitHub Releases，使用 git tags 获取最新版本
+          if PAHOLE_VER=$(curl -sf -H "${GH_API}" "https://api.github.com/repos/acmel/dwarves/tags?per_page=1" | jq -r '.[0].name' | tr -d 'v') && [ -n "${PAHOLE_VER}" ] && [ "${PAHOLE_VER}" != "null" ]; then
+            echo "升级 pahole → ${PAHOLE_VER}"
+            if git clone --depth=1 --branch "v${PAHOLE_VER}" https://github.com/acmel/dwarves.git /tmp/dwarves 2>&1; then
+              cmake -S /tmp/dwarves -B /tmp/dwarves/build \
+                -DCMAKE_INSTALL_PREFIX=/usr -D__LIB=lib -DCMAKE_BUILD_TYPE=Release
+              make -C /tmp/dwarves/build -j"$(nproc)"
+              sudo make -C /tmp/dwarves/build install
+              echo "✅ pahole 升级完成: $(pahole --version 2>&1 | head -1)"
+            else
+              echo "⚠️ pahole 源码克隆/构建失败，保留 apt 版本 (1.25)"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          else
+            echo "⚠️ 无法获取 pahole 最新版本号，保留 apt 版本 (1.25)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          fi
+
+          # ===== 4. zstd（最新版压缩工具）=====
+          echo "===== [4/5] zstd ====="
+          if ZSTD_VER=$(gh_latest facebook/zstd) && [ -n "${ZSTD_VER}" ]; then
+            echo "升级 zstd → ${ZSTD_VER}"
+            if curl -fL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-${ZSTD_VER}.tar.gz" \
+              | tar -xz -C /tmp; then
+              make -C "/tmp/zstd-${ZSTD_VER}" -j"$(nproc)"
+              sudo make -C "/tmp/zstd-${ZSTD_VER}" install PREFIX=/usr
+              echo "✅ zstd 升级完成: $(zstd --version 2>&1 | head -1)"
+            else
+              echo "⚠️ zstd 源码下载/构建失败，保留系统版本"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          else
+            echo "⚠️ 无法获取 zstd 最新版本号，保留系统版本"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          fi
+
+          # ===== 5. lz4（最新版压缩工具）=====
+          echo "===== [5/5] lz4 ====="
+          if LZ4_VER=$(gh_latest lz4/lz4) && [ -n "${LZ4_VER}" ]; then
+            echo "升级 lz4 → ${LZ4_VER}"
+            if curl -fL "https://github.com/lz4/lz4/releases/download/v${LZ4_VER}/lz4-${LZ4_VER}.tar.gz" \
+              | tar -xz -C /tmp; then
+              make -C "/tmp/lz4-${LZ4_VER}" -j"$(nproc)"
+              sudo make -C "/tmp/lz4-${LZ4_VER}" install PREFIX=/usr
+              echo "✅ lz4 升级完成: $(lz4 --version 2>&1 | head -1)"
+            else
+              echo "⚠️ lz4 源码下载/构建失败，保留系统版本"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          else
+            echo "⚠️ 无法获取 lz4 最新版本号，保留系统版本"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+          fi
+
+          # 更新动态链接器缓存
+          sudo ldconfig
+
+          echo ""
+          echo "===== 工具升级汇总 ====="
+          if [ "${FAIL_COUNT}" -eq 0 ]; then
+            echo "✅ 全部 5 个工具升级成功"
+          else
+            echo "⚠️ ${FAIL_COUNT} 个工具升级失败（已回退到 apt/系统版本）"
+          fi
 
       - name: 🚀 配置 ccache 编译加速
         run: |
           echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
           echo "/usr/lib/ccache" >> $GITHUB_PATH
           mkdir -p ${{ github.workspace }}/.ccache
-          # 增大缓存容量，覆盖完整内核编译产物
-          ccache --max-size=5G
+          # build_test 使用激进编译选项（x86-64-v3、mitigations off），
+          # 缓存容量适当增大以容纳不同配置的编译产物
+          ccache --max-size=8G
           # 按文件内容校验编译器（避免路径变化导致缓存失效）
           ccache --set-config=compiler_check=content
           # 启用压缩，节省缓存空间（level 1 几乎不影响速度）
@@ -95,40 +201,39 @@ jobs:
           ccache --set-config=compression_level=1
           # depend 模式：跳过预处理阶段直接使用依赖信息，大幅提升缓存命中
           ccache --set-config=depend_mode=true
-          # 宽松匹配：忽略 __FILE__、时间戳等宏差异
-          ccache --set-config=sloppiness=file_macro,locale,time_macros,pch_defines
+          # 宽松匹配：忽略 __FILE__、时间戳、include_file 等宏差异
+          # system_headers：缓存系统头文件的编译结果（内核编译大量引用）
+          ccache --set-config=sloppiness=file_macro,locale,time_macros,pch_defines,include_file_mtime,include_file_ctime,system_headers
+          # 直接存储编译结果到缓存（跳过临时文件，减少 I/O）
+          ccache --set-config=direct_mode=true
+          # 忽略 header 时间戳变化（GitHub Actions 每次 clone 时间戳都不同）
+          ccache --set-config=inode_cache=true
+          echo "ccache 配置完成:"
+          ccache -p | grep -E 'max_size|compression|depend_mode|sloppiness|direct_mode'
 
       - name: 📦 恢复 ccache 缓存
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          # 每次构建使用唯一 key（附加 run_id），确保更新后的缓存能被保存
-          # 恢复时按 arch+series+branch 前缀匹配最近一次缓存
-          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
+          # beta- 前缀隔离 build_test 与 build.yml 的缓存
+          # 两者编译选项不同（x86-64-v3、mitigations off 等），不能共享
+          key: beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
           restore-keys: |
-            ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
-            ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
-            ccache-${{ matrix.arch }}-
+            beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
+            beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
+            beta-ccache-${{ matrix.arch }}-
 
       - name: ⬇️ 下载内核源代码
         run: |
           set -euo pipefail
           mkdir -p ./kernel
           cd ./kernel
-          # 分支判断：mainline 从 Torvalds 库获取 Tag，stable 从 Greg 库获取分支
-          if [[ "${{ matrix.branch }}" == "mainline" ]]; then
-            echo "Mainline 分支，从 Torvalds 仓库克隆 v${{ env.KERNEL_VERSION }}..."
-            git clone --depth=1 --single-branch --no-tags --branch v${{ env.KERNEL_VERSION }} \
-              https://github.com/torvalds/linux.git linux
-          else
-            echo "Stable 分支，从 kernel.org 仓库克隆分支..."
-            branch=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
-            git clone --depth=1 --single-branch --no-tags --branch linux-${branch}.y \
-              https://github.com/gregkh/linux.git linux
-          fi
+          echo "Mainline 分支，从 Torvalds 仓库克隆 v${{ env.KERNEL_VERSION }}..."
+          git clone --depth=1 --single-branch --no-tags --branch v${{ env.KERNEL_VERSION }} \
+            https://github.com/torvalds/linux.git linux
           echo "内核源码下载完成，目录大小: $(du -sh linux | cut -f1)"
 
-      - name: 🩹 注入 BBRv3 补丁
+      - name: 🩹 注入 CachyOS 性能补丁 + BBRv3
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
@@ -138,15 +243,65 @@ jobs:
             exit 1
           fi
 
-          patch_url="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}/0002-bbr3.patch"
-          echo "检查 BBRv3 补丁是否可用: $patch_url"
-          if ! curl -sfL --head "$patch_url" >/dev/null 2>&1; then
-            echo "::error::BBRv3 补丁尚未发布于内核版本 $kernel_series"
-            exit 1
+          CACHYOS_BASE="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}"
+          BBR_APPLIED=false
+
+          # ================================================================
+          # 策略 1：尝试 base-all 全量补丁（已包含 BBRv3 + fixes + 性能优化）
+          # base-all 是 CachyOS 的一体化补丁，包含 EEVDF 调度器、AMD P-State、
+          # 内存管理、BBRv3、fixes 等全部改进。如果成功则无需单独打补丁。
+          # ================================================================
+          base_all_url="${CACHYOS_BASE}/all/0001-cachyos-base-all.patch"
+          echo "=== 策略 1：尝试 CachyOS base-all 全量补丁 ==="
+          echo "  URL: ${base_all_url}"
+          if curl -sfL --head "$base_all_url" >/dev/null 2>&1; then
+            curl -fL --retry 3 --retry-delay 2 "$base_all_url" -o /tmp/base-all.patch
+            if patch --forward --batch -p1 < /tmp/base-all.patch; then
+              echo "✅ base-all 全量补丁应用成功（包含 BBRv3 + fixes + 性能优化）"
+              BBR_APPLIED=true
+            else
+              echo "⚠️ base-all 部分冲突，回滚并切换到单独补丁模式"
+              git checkout -- . 2>/dev/null || true
+            fi
+          else
+            echo "ℹ️ base-all 尚未发布于内核 ${kernel_series}，跳过"
           fi
-          echo "下载并应用 BBRv3 补丁: $patch_url"
-          curl -fL --retry 3 --retry-delay 2 "$patch_url" -o /tmp/0002-bbr3.patch
-          patch --forward --batch -p1 < /tmp/0002-bbr3.patch
+
+          # ================================================================
+          # 策略 2：单独补丁模式（仅在 base-all 失败时使用）
+          # 先应用 fixes（best-effort），再应用 BBRv3（必需）
+          # ================================================================
+          if ! $BBR_APPLIED; then
+            echo "=== 策略 2：单独补丁模式 ==="
+
+            # --- fixes 补丁（best-effort）---
+            # 编号不固定（6.x 是 0003，7.0 是 0004），逐个探测
+            for num in 0003 0004 0005; do
+              candidate="${CACHYOS_BASE}/${num}-fixes.patch"
+              if curl -sfL --head "$candidate" >/dev/null 2>&1; then
+                echo "下载 fixes 补丁: ${num}-fixes.patch"
+                curl -fL --retry 3 --retry-delay 2 "$candidate" -o "/tmp/${num}-fixes.patch"
+                if patch --forward --batch -p1 < "/tmp/${num}-fixes.patch"; then
+                  echo "✅ ${num}-fixes.patch 应用成功"
+                else
+                  echo "⚠️ ${num}-fixes.patch 应用失败，跳过"
+                fi
+                break
+              fi
+            done
+
+            # --- BBRv3 补丁（必需）---
+            bbr_url="${CACHYOS_BASE}/0002-bbr3.patch"
+            echo "检查 BBRv3 补丁: ${bbr_url}"
+            if ! curl -sfL --head "$bbr_url" >/dev/null 2>&1; then
+              echo "::error::BBRv3 补丁尚未发布于内核版本 ${kernel_series}"
+              exit 1
+            fi
+            echo "下载并应用 BBRv3 补丁..."
+            curl -fL --retry 3 --retry-delay 2 "$bbr_url" -o /tmp/0002-bbr3.patch
+            patch --forward --batch -p1 < /tmp/0002-bbr3.patch
+            BBR_APPLIED=true
+          fi
 
           grep -q "BBR" net/ipv4/tcp_bbr.c
 
@@ -156,7 +311,7 @@ jobs:
           set -euo pipefail
           sed -i '/^MODULE_DESCRIPTION(".*BBR.*"/d' net/ipv4/tcp_bbr.c
           echo "MODULE_DESCRIPTION(\"TCP BBR v3 — Linux ${{ env.KERNEL_VERSION }} — Built by C000127\");" >> net/ipv4/tcp_bbr.c
-          
+
           tail -n 5 net/ipv4/tcp_bbr.c
 
       - name: 🔢 更新 Makefile 版本号
@@ -169,7 +324,7 @@ jobs:
           s=$(echo "${{ env.KERNEL_VERSION }}" | cut -d. -f3 | cut -d- -f1)
           # RC 版本或两段版本号（如 7.0-rc1）会导致 SUBLEVEL 为空，默认置 0
           s=${s:-0}
-          
+
           echo "Makefile 版本: VERSION=$v PATCHLEVEL=$p SUBLEVEL=$s"
           sed -i "s/^VERSION *=.*/VERSION = $v/" Makefile
           sed -i "s/^PATCHLEVEL *=.*/PATCHLEVEL = $p/" Makefile
@@ -179,11 +334,7 @@ jobs:
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            cp ${{ github.workspace }}/arm64.config .config
-          else
-            cp ${{ github.workspace }}/x86-64.config .config
-          fi
+          cp ${{ github.workspace }}/x86-64.config .config
 
           scripts/config --disable SYSTEM_TRUSTED_KEYS
           scripts/config --disable SYSTEM_REVOCATION_KEYS
@@ -249,28 +400,98 @@ jobs:
           scripts/config --disable GAMEPORT
           scripts/config --disable ACCESSIBILITY
 
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            make ARCH=arm64 olddefconfig
-          else
-            make olddefconfig
-          fi
+          # ================================================================
+          # === 激进性能优化（Beta 实验性选项）===
+          # ================================================================
 
-          # 输出关键配置供验证
+          # --- CPU 漏洞缓解措施 ---
+          # 保持默认开启，确保 Spectre/Meltdown/MDS/SRSO 等缓解生效
+          scripts/config --enable CPU_MITIGATIONS
+
+          # --- [AGGRESSIVE] 降低最大 CPU 数量 8192→256 ---
+          # MAXSMP 强制 NR_CPUS=8192，VPS 完全不需要
+          # 减少 per-CPU 数据结构内存开销，加速启动
+          scripts/config --disable MAXSMP
+          scripts/config --set-val NR_CPUS 256
+
+          # --- [AGGRESSIVE] 时钟频率 250Hz→1000Hz ---
+          # 更高时钟 = 更低调度/网络延迟，代价是微量 CPU 开销
+          scripts/config --disable HZ_100
+          scripts/config --disable HZ_250
+          scripts/config --disable HZ_300
+          scripts/config --enable HZ_1000
+          scripts/config --set-val HZ 1000
+
+          # --- [AGGRESSIVE] 禁用 IA-32 兼容层 ---
+          # 纯 64 位 VPS 不需要运行 32 位程序
+          scripts/config --disable IA32_EMULATION
+          scripts/config --disable X86_X32_ABI
+
+          # --- 启用 BTF（eBPF CO-RE 必需，现代可观测性基础）---
+          # 需要 pahole（已在工具链步骤中安装最新版）
+          scripts/config --disable DEBUG_INFO_NONE
+          scripts/config --enable DEBUG_INFO
+          scripts/config --enable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          scripts/config --enable DEBUG_INFO_BTF
+          scripts/config --enable DEBUG_INFO_BTF_MODULES
+
+          # --- RCU 深度优化 ---
+          # 将 RCU 回调从所有 CPU 上卸载到专用线程（减少延迟尖峰）
+          scripts/config --enable RCU_NOCB_CPU_DEFAULT_ALL
+          # RCU Lazy 默认开启（批量处理回调，减少唤醒次数）
+          scripts/config --disable RCU_LAZY_DEFAULT_OFF
+
+          # --- TEO CPU 空闲管理器 ---
+          # Timer Events Oriented：比 menu 更智能地预测空闲时长
+          scripts/config --enable CPU_IDLE_GOV_TEO
+
+          # --- ZSWAP 独占负载模式 ---
+          # 从 zswap 读取的页面自动从 swap 后端删除（节省 I/O）
+          scripts/config --enable ZSWAP_EXCLUSIVE_LOADS_DEFAULT_ON
+
+          # --- 内核模块 ZSTD 压缩 ---
+          # 减少 /lib/modules 磁盘占用和模块加载时间
+          scripts/config --enable MODULE_COMPRESS_ZSTD
+          scripts/config --disable MODULE_COMPRESS_NONE
+
+          # --- Haltpoll CPU 空闲（虚拟化加速）---
+          # VM 中在 halt 前自旋等待，减少 VMEXIT 延迟
+          scripts/config --enable HALTPOLL_CPUIDLE
+
+          # --- 网络补充优化 ---
+          # TLS 内核卸载（VPS 用于反向代理加速）
+          scripts/config --module TLS
+          scripts/config --enable TLS_DEVICE
+          # MPTCP（多路径 TCP，提升网络弹性）
+          scripts/config --enable MPTCP
+          # XDP Sockets（高性能用户态包处理）
+          scripts/config --enable XDP_SOCKETS
+
+          # --- sched_ext（可加载外部调度器，实验特性）---
+          scripts/config --enable SCHED_CLASS_EXT
+
+          make olddefconfig
+
           # 保存配置文件副本用于后续上传（bindeb-pkg 会改变目录结构）
           cp .config ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
           echo "=== 关键配置验证 ==="
-          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_SOUND=|CONFIG_DRM=|CONFIG_HYPERV=|CONFIG_MICROCODE=|CONFIG_PAGE_POOL_STATS=|CONFIG_ZSWAP_DEFAULT_ON=' .config || true
+          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_CPU_MITIGATIONS=|CONFIG_HZ=|CONFIG_NR_CPUS=|CONFIG_DEBUG_INFO_BTF=|CONFIG_IA32_EMULATION=|CONFIG_MODULE_COMPRESS_ZSTD=|CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=|CONFIG_ZSWAP_EXCLUSIVE_LOADS=|CONFIG_SCHED_CLASS_EXT=' .config || true
 
-          echo "=== 检查 olddefconfig 是否产生了意外变更 ==="
+          echo "=== 检查关键配置是否生效 ==="
           UNEXPECTED=0
           grep -q 'CONFIG_KERNEL_ZSTD=y' .config || { echo "::warning::CONFIG_KERNEL_ZSTD 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_NO_HZ_IDLE=y' .config || { echo "::warning::CONFIG_NO_HZ_IDLE 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=1; }
-          if [ $UNEXPECTED -eq 1 ]; then
-            echo "::warning::部分关键配置未生效，请检查基础配置文件是否需要更新"
+          grep -q 'CONFIG_DEBUG_INFO_BTF=y' .config || { echo "::warning::CONFIG_DEBUG_INFO_BTF 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_HZ=1000' .config || { echo "::warning::CONFIG_HZ=1000 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_CPU_MITIGATIONS=y' .config || { echo "::warning::CPU_MITIGATIONS 未启用！"; UNEXPECTED=1; }
+          if [ $UNEXPECTED -eq 0 ]; then
+            echo "✅ 全部关键配置验证通过"
+          else
+            echo "::warning::${UNEXPECTED} 项关键配置未生效，请检查基础配置文件"
           fi
 
       - name: 🏗️ 构建内核 Debian 包
@@ -281,25 +502,29 @@ jobs:
           KBUILD_BUILD_USER: c000127
           KBUILD_BUILD_HOST: github
           # 跳过 .deb 内部压缩（节省 ~30 秒打包时间，安装时无影响）
-          KDEB_COMPRESS: none
+          KDEB_COMPRESS: zstd
         run: |
           set -euo pipefail
           BUILD_START=$(date +%s)
           # -pipe: 使用管道替代临时文件传递编译阶段数据
           # -j$(nproc): 充分利用所有 CPU 核心
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            make ARCH=arm64 bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3 \
-              KCFLAGS="-pipe"
-          else
-            make bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3 \
-              KCFLAGS="-pipe"
-          fi
+          # x86-64-v3: 启用 AVX2, BMI1/2, FMA, MOVBE 等现代指令集
+          # 要求 2013 年后的 CPU（Haswell+/Zen+），覆盖绝大多数云 VPS
+          make bindeb-pkg -j$(nproc) \
+            LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3-beta \
+            KCFLAGS="-march=x86-64-v3 -pipe"
           BUILD_END=$(date +%s)
           echo "编译耗时: $(( (BUILD_END - BUILD_START) / 60 )) 分 $(( (BUILD_END - BUILD_START) % 60 )) 秒"
           echo "ccache 命中统计:"
           ccache -s || true
+
+          # 清理不需要上传的包：
+          #   -dbg: 调试符号包，启用 BTF 后超过 2GB，超出 GitHub release 上限
+          #   linux-libc-dev: C 库头文件，运行时不需要
+          cd ${{ github.workspace }}/kernel
+          rm -fv linux-image-*-dbg_*.deb linux-libc-dev_*.deb
+          echo "最终上传的 .deb 文件："
+          ls -lh linux-*.deb
 
       - name: 📤 上传配置文件
         uses: actions/upload-artifact@v4
@@ -315,7 +540,7 @@ jobs:
 
       - name: 🧹 清理已有 Release 资源
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta"
           RELEASE=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
@@ -333,76 +558,64 @@ jobs:
       - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}
+          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta
+          prerelease: true
           files: ./kernel/linux-*.deb
-          body: |
-            ## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
-
-            | 项目 | 值 |
-            |---|---|
-            | 内核版本 | ${{ env.KERNEL_VERSION }} |
-            | 内核分支 | ${{ matrix.branch }} |
-            | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
-            | 架构 | ${{ matrix.arch }} |
-            | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) (version-matched) |
-            | 拥塞控制 | BBRv3 (built-in) |
-            | 默认 Qdisc | fq |
-            | 定时器 | NO_HZ_IDLE |
-            | 抢占模型 | PREEMPT_LAZY |
-            | 时钟频率 | HZ=250 |
-            | 内核压缩 | ZSTD |
-            | 编译优化 | ccache + VPS 精简配置 |
-
-            ### 🔧 VPS 优化
-            - BPF JIT 始终开启、TCP-AO (RFC 5925)、PAGE_POOL_STATS、zswap 默认启用
-            - 禁用 ~30 个不必要的硬件驱动（声卡、物理显卡、WiFi、蓝牙、InfiniBand 等）
-
-            ### 📦 安装方式
-            ```bash
-            bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/main/install.sh)
-            ```
-
-            或手动下载 .deb 文件后执行：
-            ```bash
-            sudo dpkg -i linux-*.deb && sudo update-grub && sudo reboot
-            ```
-
-            ### ⚠️ 注意
-            - 仅适用于 Debian 11+ / Ubuntu 20.04+ 系统
-            - 安装后需重启生效
 
       - name: 🔄 更新 Release 说明
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta"
           RELEASE_ID=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
             | jq -r '.id')
           if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
-            BODY="## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
+            BODY="## 🧪 [Beta] Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
+
+          > ⚠️ **激进优化版本** — x86-64-v3 指令集、1000Hz 时钟
 
           | 项目 | 值 |
           |---|---|
           | 内核版本 | ${{ env.KERNEL_VERSION }} |
           | 内核分支 | ${{ matrix.branch }} |
           | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
-          | 架构 | ${{ matrix.arch }} |
-          | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) (version-matched) |
+          | 架构 | ${{ matrix.arch }} (x86-64-v3, 需 Haswell+/Zen+) |
+          | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) |
+          | 性能补丁 | CachyOS base + fixes (best-effort) |
           | 拥塞控制 | BBRv3 (built-in) |
           | 默认 Qdisc | fq |
           | 定时器 | NO_HZ_IDLE |
+          | 抢占模型 | PREEMPT_LAZY + PREEMPT_DYNAMIC |
+          | 时钟频率 | **HZ=1000** (低延迟) |
+          | 最大 CPU | 256 (降低自 8192) |
           | 内核压缩 | ZSTD |
-          | 编译优化 | ccache + VPS 精简配置 |
+          | 模块压缩 | ZSTD |
+          | eBPF | BTF 已启用 (CO-RE) |
+          | CPU 缓解 | **已启用** (安全优先) |
+          | 32 位兼容 | **已禁用** (纯 64 位) |
+          | 编译优化 | GCC 15 + ccache + \`-march=x86-64-v3\` |
+
+          ### 🚀 激进优化
+          - **CPU 漏洞缓解已开启** — Spectre/Meltdown/MDS/SRSO/GDS/RFDS/TAA 等安全补丁生效
+          - **x86-64-v3 指令集** — AVX2, BMI1/2, FMA, MOVBE（需 2013+ CPU）
+          - **1000Hz 时钟** — 更低的调度和网络响应延迟
+          - **NR_CPUS=256** — 精简 per-CPU 结构，减少内存开销
+          - **RCU 优化** — NOCB_CPU_DEFAULT_ALL + RCU_LAZY 默认开启
+          - **BTF 调试信息** — 支持 bpftrace/bcc/libbpf 等现代可观测性工具
 
           ### 🔧 VPS 优化
-          - BPF JIT 始终开启、TCP-AO (RFC 5925)、PAGE_POOL_STATS、zswap 默认启用
-          - 禁用 ~30 个不必要的硬件驱动（声卡、物理显卡、WiFi、蓝牙、InfiniBand 等）
+          - BPF JIT 始终开启、TCP-AO (RFC 5925)、MPTCP、XDP Sockets
+          - PAGE_POOL_STATS、zswap(ZSTD+exclusive)、HALTPOLL_CPUIDLE
+          - TEO CPU 空闲管理、sched_ext 外部调度器支持
+          - 禁用 ~30 个不必要的硬件驱动 + 32 位兼容层
+          - CachyOS 社区性能补丁（调度器/内存/驱动修复）
 
           ### 📦 安装方式
           \`\`\`bash
           bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/main/install.sh)
           \`\`\`
+          安装后选择 **Beta（测试 - 激进优化）** 分支即可。
 
           或手动下载 .deb 文件后执行：
           \`\`\`bash
@@ -411,7 +624,12 @@ jobs:
 
           ### ⚠️ 注意
           - 仅适用于 Debian 11+ / Ubuntu 20.04+ 系统
-          - 安装后需重启生效"
+          - 需要 Haswell+/Zen+ 以上 CPU（支持 x86-64-v3 指令集）
+          - CPU 漏洞缓解已启用，可在任意环境中安全使用
+          - 安装后需重启生效
+
+          ### 🛠️ 工具链
+          - GCC 15 (latest)、ccache (latest)、pahole (latest)、zstd (latest)、lz4 (latest)"
 
             curl -sf -X PATCH \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -420,3 +638,4 @@ jobs:
               -d "$(jq -n --arg body "$BODY" '{body: $body}')"
             echo "已更新 Release 说明"
           fi
+
