@@ -324,8 +324,8 @@ install_packages() {
     if sudo dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
         echo -e "\033[1;32m━━━━━━━━ 安装完成 ━━━━━━━━\033[0m"
         NEW_KERNEL_VER=$(get_installed_version)
-        echo -e "\033[36m  已安装：\033[1;32m${NEW_KERNEL_VER:-"未知"}\033[0m"
-        echo -e "\033[36m  当前运行：\033[1;32m$(uname -r)\033[0m"
+        echo -e "\033[36m  新内核：    \033[1;32m${NEW_KERNEL_VER:-"未知"}\033[0m"
+        echo -e "\033[33m  重启前：    $(uname -r)（旧内核仍在运行）\033[0m"
         echo -e "\033[33m  ⚠ 需要重启后生效\033[0m"
         echo -n -e "\033[33m是否立即重启？ (y/n): \033[0m"
         read -r REBOOT_NOW
@@ -585,11 +585,20 @@ case "$ACTION" in
         INSTALLED_VER=$(get_installed_version)
         INSTALLED_BR=$(get_installed_branch)
         echo -e "\033[34m──────────── \033[1;33m📋 内核信息 \033[0m\033[34m────────────\033[0m"
-        echo -e "\033[36m  运行内核：\033[0m\033[1;32m$(uname -r)\033[0m"
+        local RUNNING_VER
+        RUNNING_VER=$(uname -r)
         if [[ -z "$INSTALLED_VER" ]]; then
+            echo -e "\033[36m  运行内核：\033[0m\033[1;32m$RUNNING_VER\033[0m"
             echo -e "\033[33m  未检测到由本脚本安装的优化内核。\033[0m"
+        elif [[ "$RUNNING_VER" == *"$KERNEL_BRAND"* ]]; then
+            # 运行的就是已安装的优化内核
+            echo -e "\033[36m  内核：    \033[0m\033[1;32m$INSTALLED_VER\033[0m"
         else
-            echo -e "\033[36m  已安装：  \033[0m\033[1;32m$INSTALLED_VER\033[0m"
+            # 已安装但未重启，运行的是旧内核
+            echo -e "\033[36m  已安装：  \033[0m\033[1;32m$INSTALLED_VER\033[0m\033[33m（重启后生效）\033[0m"
+            echo -e "\033[33m  运行中：  $RUNNING_VER（旧内核）\033[0m"
+        fi
+        if [[ -n "$INSTALLED_VER" ]]; then
             case "$INSTALLED_BR" in
                 mainline)
                     echo -e "\033[36m  分支：    \033[0m\033[1;32mMainline（主线）\033[0m"
