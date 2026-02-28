@@ -258,6 +258,8 @@ jobs:
 
           CACHYOS_BASE="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}"
           BBR_APPLIED=false
+          BASE_ALL_APPLIED=false
+          FIXES_PATCH_NUM=""
 
           # ================================================================
           # 策略 1：尝试 base-all 全量补丁（已包含 BBRv3 + fixes + 性能优化）
@@ -272,6 +274,7 @@ jobs:
             if patch --forward --batch -p1 < /tmp/base-all.patch; then
               echo "✅ base-all 全量补丁应用成功（包含 BBRv3 + fixes + 性能优化）"
               BBR_APPLIED=true
+              BASE_ALL_APPLIED=true
             else
               echo "⚠️ base-all 部分冲突，回滚并切换到单独补丁模式"
               git checkout -- . 2>/dev/null || true
@@ -296,6 +299,7 @@ jobs:
                 curl -fL --retry 3 --retry-delay 2 "$candidate" -o "/tmp/${num}-fixes.patch"
                 if patch --forward --batch -p1 < "/tmp/${num}-fixes.patch"; then
                   echo "✅ ${num}-fixes.patch 应用成功"
+                  FIXES_PATCH_NUM="${num}"
                 else
                   echo "⚠️ ${num}-fixes.patch 应用失败，跳过"
                 fi
@@ -317,6 +321,21 @@ jobs:
           fi
 
           grep -q "BBR" net/ipv4/tcp_bbr.c
+
+          # 记录实际使用的补丁信息（用于 Release 说明）
+          CACHYOS_URL="https://github.com/CachyOS/kernel-patches/blob/master/${kernel_series}"
+          {
+            echo "PATCH_LINES<<PATCH_EOF"
+            if $BASE_ALL_APPLIED; then
+              echo "| 补丁 | [cachyos-base-all](${CACHYOS_URL}/all/0001-cachyos-base-all.patch) for ${kernel_series} (含 BBRv3 + fixes + 性能优化) |"
+            else
+              if [ -n "${FIXES_PATCH_NUM}" ]; then
+                echo "| Fixes 补丁 | [${FIXES_PATCH_NUM}-fixes.patch](${CACHYOS_URL}/${FIXES_PATCH_NUM}-fixes.patch) for ${kernel_series} |"
+              fi
+              echo "| BBR 补丁 | [0002-bbr3.patch](${CACHYOS_URL}/0002-bbr3.patch) for ${kernel_series} |"
+            fi
+            echo "PATCH_EOF"
+          } >> $GITHUB_ENV
 
       - name: ✏️ 编译声明
         working-directory: ./kernel/linux
@@ -578,8 +597,7 @@ jobs:
           | 内核分支 | ${{ matrix.branch }} |
           | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
           | 架构 | ${{ matrix.arch }} |
-          | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) |
-          | 性能补丁 | CachyOS base + fixes (best-effort) |
+          ${{ env.PATCH_LINES }}
           | 拥塞控制 | BBRv3 (built-in) |
           | 默认 Qdisc | fq |
           | 定时器 | NO_HZ_IDLE |
