@@ -214,22 +214,22 @@ select_branch() {
     echo -e "\033[33m 2. Stable（稳定）\033[0m"
     echo -e "\033[33m 3. Beta（测试 - 激进优化）\033[0m"
     echo -e "\033[33m 0. 返回上一级\033[0m"
-    echo -n -e "\033[36m请选择 (0-3): \033[0m"
-    read -r branch_choice
-    case "$branch_choice" in
-        1) SELECTED_BRANCH="mainline" ;;
-        2) SELECTED_BRANCH="stable" ;;
-        3) SELECTED_BRANCH="beta" ;;
-        0)
-            SELECTED_BRANCH=""
-            return 1
-            ;;
-        *)
-            echo -e "\033[31m无效选择，操作取消。\033[0m"
-            SELECTED_BRANCH=""
-            return 1
-            ;;
-    esac
+    while true; do
+        echo -n -e "\033[36m请选择 (0-3): \033[0m"
+        read -r branch_choice
+        case "$branch_choice" in
+            1) SELECTED_BRANCH="mainline"; return 0 ;;
+            2) SELECTED_BRANCH="stable"; return 0 ;;
+            3) SELECTED_BRANCH="beta"; return 0 ;;
+            0)
+                SELECTED_BRANCH=""
+                return 1
+                ;;
+            *)
+                echo -e "\033[31m无效输入，请重新选择\033[0m"
+                ;;
+        esac
+    done
 }
 
 # 函数：智能分支选择（已安装则默认更新同分支，切换需二次确认）
@@ -250,34 +250,37 @@ smart_select_branch() {
         echo -e "\033[33m 1. 更新当前分支 (${BRANCH_DISPLAY}) 到最新版\033[0m"
         echo -e "\033[33m 2. 切换到其他分支\033[0m"
         echo -e "\033[33m 0. 返回主菜单\033[0m"
-        echo -n -e "\033[36m请选择 (0-2，默认 1): \033[0m"
-        read -r update_choice
-        case "${update_choice:-1}" in
-            1)
-                SELECTED_BRANCH="$INSTALLED_BRANCH"
-                ;;
-            2)
-                select_branch || return 1
-                if [[ "$SELECTED_BRANCH" != "$INSTALLED_BRANCH" ]]; then
-                    echo ""
-                    echo -e "\033[31m⚠️ 您正在从 ${BRANCH_DISPLAY} 切换到 ${SELECTED_BRANCH} 分支\033[0m"
-                    echo -e "\033[33m   切换分支会卸载当前内核，安装新分支的内核。\033[0m"
-                    echo -n -e "\033[36m确认切换？(y/n): \033[0m"
-                    read -r confirm
-                    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-                        echo -e "\033[33m已取消操作。\033[0m"
-                        return 1
+        while true; do
+            echo -n -e "\033[36m请选择 (0-2，默认 1): \033[0m"
+            read -r update_choice
+            case "${update_choice:-1}" in
+                1)
+                    SELECTED_BRANCH="$INSTALLED_BRANCH"
+                    return 0
+                    ;;
+                2)
+                    select_branch || return 1
+                    if [[ "$SELECTED_BRANCH" != "$INSTALLED_BRANCH" ]]; then
+                        echo ""
+                        echo -e "\033[31m⚠️ 您正在从 ${BRANCH_DISPLAY} 切换到 ${SELECTED_BRANCH} 分支\033[0m"
+                        echo -e "\033[33m   切换分支会卸载当前内核，安装新分支的内核。\033[0m"
+                        echo -n -e "\033[36m确认切换？(y/n): \033[0m"
+                        read -r confirm
+                        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                            echo -e "\033[33m已取消操作。\033[0m"
+                            return 1
+                        fi
                     fi
-                fi
-                ;;
-            0)
-                return 1
-                ;;
-            *)
-                echo -e "\033[31m无效选择，操作取消。\033[0m"
-                return 1
-                ;;
-        esac
+                    return 0
+                    ;;
+                0)
+                    return 1
+                    ;;
+                *)
+                    echo -e "\033[31m无效输入，请重新选择\033[0m"
+                    ;;
+            esac
+        done
     else
         select_branch || return 1
     fi
@@ -686,7 +689,8 @@ case "$ACTION" in
         echo -e "\033[36m当前运行内核：\033[0m\033[1;32m$(uname -r)\033[0m"
         ;;
     *)
-        echo -e "\033[31m(￣▽￣)ゞ 无效的选项，请输入 0-9 之间的数字哦~\033[0m"
+        echo -e "\033[31m(￣▽￣)ゞ 无效输入，请输入 0-9 之间的数字哦~\033[0m"
+        continue
         ;;
 esac
 
