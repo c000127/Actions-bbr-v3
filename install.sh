@@ -580,73 +580,68 @@ case "$ACTION" in
         continue
         ;;
     3)
-        echo -e "\033[1;32m(•̀ᴗ•́) 内核与 BBR 状态\033[0m"
         echo ""
         # 内核版本信息
         INSTALLED_VER=$(get_installed_version)
         INSTALLED_BR=$(get_installed_branch)
-        echo -e "\033[36m当前运行内核：\033[0m\033[1;32m$(uname -r)\033[0m"
+        echo -e "\033[34m──────────── \033[1;33m📋 内核信息 \033[0m\033[34m────────────\033[0m"
+        echo -e "\033[36m  运行内核：\033[0m\033[1;32m$(uname -r)\033[0m"
         if [[ -z "$INSTALLED_VER" ]]; then
-            echo -e "\033[33m未检测到由本脚本安装的优化内核。\033[0m"
+            echo -e "\033[33m  未检测到由本脚本安装的优化内核。\033[0m"
         else
-            echo -e "\033[36m已安装版本：  \033[0m\033[1;32m$INSTALLED_VER\033[0m"
+            echo -e "\033[36m  已安装：  \033[0m\033[1;32m$INSTALLED_VER\033[0m"
             case "$INSTALLED_BR" in
                 mainline)
-                    echo -e "\033[36m内核分支：    \033[0m\033[1;32mMainline（主线）\033[0m"
-                    echo -e "\033[36m  特点：标准编译，保留 CPU 漏洞缓解，安全优先\033[0m"
+                    echo -e "\033[36m  分支：    \033[0m\033[1;32mMainline（主线）\033[0m"
+                    echo -e "\033[36m  特点：    标准编译 | CPU 漏洞缓解 | 安全优先\033[0m"
                     ;;
                 stable)
-                    echo -e "\033[36m内核分支：    \033[0m\033[1;32mStable（稳定）\033[0m"
-                    echo -e "\033[36m  特点：稳定分支，仅包含 Bug 修复\033[0m"
+                    echo -e "\033[36m  分支：    \033[0m\033[1;32mStable（稳定）\033[0m"
+                    echo -e "\033[36m  特点：    稳定分支 | 仅含 Bug 修复\033[0m"
                     ;;
                 beta)
-                    echo -e "\033[36m内核分支：    \033[0m\033[1;31mBeta（测试 - 激进优化）\033[0m"
-                    echo -e "\033[36m  特点：\033[0m"
-                    echo -e "\033[33m    ✅  CPU 漏洞缓解已启用（安全优先）\033[0m"
-                    echo -e "\033[33m    🚀 x86-64-v3 指令集（需 Haswell+/Zen+ CPU）\033[0m"
-                    echo -e "\033[33m    ⏱️  HZ=1000 低延迟时钟\033[0m"
-                    echo -e "\033[33m    📊 BTF/eBPF CO-RE 可观测性\033[0m"
-                    echo -e "\033[33m    🚫 纯 64 位（无 IA-32 兼容层）\033[0m"
-                    echo -e "\033[33m    🧩 CachyOS 性能补丁\033[0m"
+                    echo -e "\033[36m  分支：    \033[0m\033[1;31mBeta（测试 - 激进优化）\033[0m"
+                    echo -e "\033[36m  特点：    CPU 漏洞缓解 | x86-64-v3 | HZ=1000\033[0m"
+                    echo -e "\033[36m            BTF/eBPF | 纯 64 位 | CachyOS 补丁\033[0m"
                     ;;
                 *)
-                    echo -e "\033[36m内核分支：    \033[0m\033[33m未知\033[0m"
+                    echo -e "\033[36m  分支：    \033[0m\033[33m未知\033[0m"
                     ;;
             esac
         fi
         echo ""
         # BBR 状态检查
+        echo -e "\033[34m──────────── \033[1;33m🔍 BBR 状态 \033[0m\033[34m────────────\033[0m"
         BBR_MODULE_INFO=$(modinfo tcp_bbr 2>/dev/null)
         if [[ -z "$BBR_MODULE_INFO" ]]; then
-            echo -e "\033[36m正在刷新模块依赖...\033[0m"
+            echo -e "\033[36m  正在刷新模块依赖...\033[0m"
             sudo depmod -a
             BBR_MODULE_INFO=$(modinfo tcp_bbr 2>/dev/null)
         fi
         if [[ -z "$BBR_MODULE_INFO" ]]; then
-            echo -e "\033[31m⚠ 未加载 tcp_bbr 模块，无法检查 BBR 版本。请先安装内核并重启。\033[0m"
+            echo -e "\033[31m  ⚠ 未加载 tcp_bbr 模块，请先安装内核并重启\033[0m"
         else
             BBR_VERSION=$(echo "$BBR_MODULE_INFO" | awk '/^version:/ {print $2}')
-            if [[ "$BBR_VERSION" == "3" ]]; then
-                echo -e "\033[36m✔ BBR 模块版本：\033[0m\033[1;32m$BBR_VERSION (v3)\033[0m"
-            else
-                echo -e "\033[33m⚠ BBR 模块版本：$BBR_VERSION，不是 v3\033[0m"
-            fi
-
             CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-            if [[ "$CURRENT_ALGO" == "bbr" ]]; then
-                echo -e "\033[36m✔ TCP 拥塞控制：  \033[0m\033[1;32m$CURRENT_ALGO\033[0m"
-            else
-                echo -e "\033[33m⚠ TCP 拥塞控制：  $CURRENT_ALGO（非 bbr）\033[0m"
-            fi
-
             CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
-            echo -e "\033[36m✔ 队列算法：    \033[0m\033[1;32m$CURRENT_QDISC\033[0m"
 
-            echo ""
-            if [[ "$BBR_VERSION" == "3" && "$CURRENT_ALGO" == "bbr" ]]; then
-                echo -e "\033[1;32mヽ(✿ﾟ▽ﾟ)ノ BBR v3 已正确安装并生效！\033[0m"
+            if [[ "$BBR_VERSION" == "3" ]]; then
+                echo -e "\033[36m  BBR 版本：\033[0m\033[1;32m$BBR_VERSION (v3) ✔\033[0m"
             else
-                echo -e "\033[33mBBR v3 未完全生效。请确保已安装内核并重启，然后使用选项 4-7 启用。\033[0m"
+                echo -e "\033[33m  BBR 版本：$BBR_VERSION（非 v3）⚠\033[0m"
+            fi
+            if [[ "$CURRENT_ALGO" == "bbr" ]]; then
+                echo -e "\033[36m  拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO ✔\033[0m"
+            else
+                echo -e "\033[33m  拥塞控制：$CURRENT_ALGO（非 bbr）⚠\033[0m"
+            fi
+            echo -e "\033[36m  队列算法：\033[0m\033[1;32m$CURRENT_QDISC ✔\033[0m"
+
+            echo -e "\033[34m─────────────────────────────────────\033[0m"
+            if [[ "$BBR_VERSION" == "3" && "$CURRENT_ALGO" == "bbr" ]]; then
+                echo -e "\033[1;32m  ヽ(✿ﾟ▽ﾟ)ノ BBR v3 已正确安装并生效！\033[0m"
+            else
+                echo -e "\033[33m  BBR v3 未完全生效，请安装内核并重启后使用选项 4-7 启用\033[0m"
             fi
         fi
         ;;
