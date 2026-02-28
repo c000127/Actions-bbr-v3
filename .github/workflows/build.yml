@@ -322,21 +322,21 @@ jobs:
           name: deb-${{ matrix.arch }}-${{ matrix.branch }}
           path: ./kernel/linux-*.deb
 
-      - name: 🧹 删除已有 Release（避免 asset 同名冲突）
+      - name: 🧹 清理已有 Release 资源
         run: |
           TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
-          RELEASE_ID=$(curl -sf \
+          RELEASE=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
-            | jq -r '.id') || true
-          if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
-            echo "删除已有 Release: ${TAG} (id=${RELEASE_ID})"
-            curl -sf -X DELETE \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}"
-            echo "✅ 已删除"
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}") || true
+          if [[ -n "$RELEASE" ]]; then
+            echo "$RELEASE" | jq -r '.assets[].id' | while read asset_id; do
+              curl -sf -X DELETE \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/assets/${asset_id}"
+              echo "已删除 asset $asset_id"
+            done
           fi
 
       - name: 🎉 发布到 GitHub Release
@@ -344,41 +344,6 @@ jobs:
         with:
           tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}
           files: ./kernel/linux-*.deb
-          body: |
-            ## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
-
-            | 项目 | 值 |
-            |---|---|
-            | 内核版本 | ${{ env.KERNEL_VERSION }} |
-            | 内核分支 | ${{ matrix.branch }} |
-            | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
-            | 架构 | ${{ matrix.arch }} |
-            | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) (version-matched) |
-            | 拥塞控制 | BBRv3 (built-in) |
-            | 默认 Qdisc | fq |
-            | 定时器 | NO_HZ_IDLE |
-            | 抢占模型 | PREEMPT_LAZY |
-            | 时钟频率 | HZ=250 |
-            | 内核压缩 | ZSTD |
-            | 编译优化 | ccache + VPS 精简配置 |
-
-            ### 🔧 VPS 优化
-            - BPF JIT 始终开启、TCP-AO (RFC 5925)、PAGE_POOL_STATS、zswap 默认启用
-            - 禁用 ~30 个不必要的硬件驱动（声卡、物理显卡、WiFi、蓝牙、InfiniBand 等）
-
-            ### 📦 安装方式
-            ```bash
-            bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/dev/install.sh)
-            ```
-
-            或手动下载 .deb 文件后执行：
-            ```bash
-            sudo dpkg -i linux-*.deb && sudo update-grub && sudo reboot
-            ```
-
-            ### ⚠️ 注意
-            - 仅适用于 Debian 11+ / Ubuntu 20.04+ 系统
-            - 安装后需重启生效
 
       - name: 🔄 更新 Release 说明
         run: |

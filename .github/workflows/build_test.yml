@@ -538,21 +538,21 @@ jobs:
           name: deb-${{ matrix.arch }}-${{ matrix.branch }}
           path: ./kernel/linux-*.deb
 
-      - name: 🧹 删除已有 Release（避免 asset 同名冲突）
+      - name: 🧹 清理已有 Release 资源
         run: |
           TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta"
-          RELEASE_ID=$(curl -sf \
+          RELEASE=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
-            | jq -r '.id') || true
-          if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
-            echo "删除已有 Release: ${TAG} (id=${RELEASE_ID})"
-            curl -sf -X DELETE \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}"
-            echo "✅ 已删除"
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}") || true
+          if [[ -n "$RELEASE" ]]; then
+            echo "$RELEASE" | jq -r '.assets[].id' | while read asset_id; do
+              curl -sf -X DELETE \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/assets/${asset_id}"
+              echo "已删除 asset $asset_id"
+            done
           fi
 
       - name: 🎉 发布到 GitHub Release
@@ -561,63 +561,81 @@ jobs:
           tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta
           prerelease: true
           files: ./kernel/linux-*.deb
-          body: |
-            ## 🧪 [Beta] Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
-            > ⚠️ **激进优化版本** — x86-64-v3 指令集、1000Hz 时钟
+      - name: 🔄 更新 Release 说明
+        run: |
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}-beta"
+          RELEASE_ID=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
+            | jq -r '.id')
+          if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
+            BODY="## 🧪 [Beta] Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
-            | 项目 | 值 |
-            |---|---|
-            | 内核版本 | ${{ env.KERNEL_VERSION }} |
-            | 内核分支 | ${{ matrix.branch }} |
-            | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
-            | 架构 | ${{ matrix.arch }} (x86-64-v3, 需 Haswell+/Zen+) |
-            | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) |
-            | 性能补丁 | CachyOS base + fixes (best-effort) |
-            | 拥塞控制 | BBRv3 (built-in) |
-            | 默认 Qdisc | fq |
-            | 定时器 | NO_HZ_IDLE |
-            | 抢占模型 | PREEMPT_LAZY + PREEMPT_DYNAMIC |
-            | 时钟频率 | **HZ=1000** (低延迟) |
-            | 最大 CPU | 256 (降低自 8192) |
-            | 内核压缩 | ZSTD |
-            | 模块压缩 | ZSTD |
-            | eBPF | BTF 已启用 (CO-RE) |
-            | CPU 缓解 | **已启用** (安全优先) |
-            | 32 位兼容 | **已禁用** (纯 64 位) |
-            | 编译优化 | GCC 15 + ccache + `-march=x86-64-v3` |
+          > ⚠️ **激进优化版本** — x86-64-v3 指令集、1000Hz 时钟
 
-            ### 🚀 激进优化
-            - **CPU 漏洞缓解已开启** — Spectre/Meltdown/MDS/SRSO/GDS/RFDS/TAA 等安全补丁生效
-            - **x86-64-v3 指令集** — AVX2, BMI1/2, FMA, MOVBE（需 2013+ CPU）
-            - **1000Hz 时钟** — 更低的调度和网络响应延迟
-            - **NR_CPUS=256** — 精简 per-CPU 结构，减少内存开销
-            - **RCU 优化** — NOCB_CPU_DEFAULT_ALL + RCU_LAZY 默认开启
-            - **BTF 调试信息** — 支持 bpftrace/bcc/libbpf 等现代可观测性工具
+          | 项目 | 值 |
+          |---|---|
+          | 内核版本 | ${{ env.KERNEL_VERSION }} |
+          | 内核分支 | ${{ matrix.branch }} |
+          | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
+          | 架构 | ${{ matrix.arch }} (x86-64-v3, 需 Haswell+/Zen+) |
+          | BBR 补丁 | [CachyOS/kernel-patches](https://github.com/CachyOS/kernel-patches/blob/master/${{ env.KERNEL_SERIES }}/0002-bbr3.patch) |
+          | 性能补丁 | CachyOS base + fixes (best-effort) |
+          | 拥塞控制 | BBRv3 (built-in) |
+          | 默认 Qdisc | fq |
+          | 定时器 | NO_HZ_IDLE |
+          | 抢占模型 | PREEMPT_LAZY + PREEMPT_DYNAMIC |
+          | 时钟频率 | **HZ=1000** (低延迟) |
+          | 最大 CPU | 256 (降低自 8192) |
+          | 内核压缩 | ZSTD |
+          | 模块压缩 | ZSTD |
+          | eBPF | BTF 已启用 (CO-RE) |
+          | CPU 缓解 | **已启用** (安全优先) |
+          | 32 位兼容 | **已禁用** (纯 64 位) |
+          | 编译优化 | GCC 15 + ccache + \`-march=x86-64-v3\` |
 
-            ### 🔧 VPS 优化
-            - BPF JIT 始终开启、TCP-AO (RFC 5925)、MPTCP、XDP Sockets
-            - PAGE_POOL_STATS、zswap(ZSTD+exclusive)、HALTPOLL_CPUIDLE
-            - TEO CPU 空闲管理、sched_ext 外部调度器支持
-            - 禁用 ~30 个不必要的硬件驱动 + 32 位兼容层
-            - CachyOS 社区性能补丁（调度器/内存/驱动修复）
+          ### 🚀 激进优化
+          - **CPU 漏洞缓解已开启** — Spectre/Meltdown/MDS/SRSO/GDS/RFDS/TAA 等安全补丁生效
+          - **x86-64-v3 指令集** — AVX2, BMI1/2, FMA, MOVBE（需 2013+ CPU）
+          - **1000Hz 时钟** — 更低的调度和网络响应延迟
+          - **NR_CPUS=256** — 精简 per-CPU 结构，减少内存开销
+          - **RCU 优化** — NOCB_CPU_DEFAULT_ALL + RCU_LAZY 默认开启
+          - **BTF 调试信息** — 支持 bpftrace/bcc/libbpf 等现代可观测性工具
 
-            ### � 安装方式
-            ```bash
-            bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/dev/install.sh)
-            ```
-            安装后选择 **Beta（测试 - 激进优化）** 分支即可。
+          ### 🔧 VPS 优化
+          - BPF JIT 始终开启、TCP-AO (RFC 5925)、MPTCP、XDP Sockets
+          - PAGE_POOL_STATS、zswap(ZSTD+exclusive)、HALTPOLL_CPUIDLE
+          - TEO CPU 空闲管理、sched_ext 外部调度器支持
+          - 禁用 ~30 个不必要的硬件驱动 + 32 位兼容层
+          - CachyOS 社区性能补丁（调度器/内存/驱动修复）
 
-            或手动下载 .deb 文件后执行：
-            ```bash
-            sudo dpkg -i linux-*.deb && sudo update-grub && sudo reboot
-            ```
+          ### 📦 安装方式
+          \`\`\`bash
+          bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/dev/install.sh)
+          \`\`\`
+          安装后选择 **Beta（测试 - 激进优化）** 分支即可。
 
-            ### ⚠️ 注意
-            - 仅适用于 Debian 11+ / Ubuntu 20.04+ 系统
-            - 需要 Haswell+/Zen+ 以上 CPU（支持 x86-64-v3 指令集）
-            - CPU 漏洞缓解已启用，可在任意环境中安全使用
-            - 安装后需重启生效
+          或手动下载 .deb 文件后执行：
+          \`\`\`bash
+          sudo dpkg -i linux-*.deb && sudo update-grub && sudo reboot
+          \`\`\`
 
-            ### �🛠️ 工具链
-            - GCC 15 (latest)、ccache (latest)、pahole (latest)、zstd (latest)、lz4 (latest)
+          ### ⚠️ 注意
+          - 仅适用于 Debian 11+ / Ubuntu 20.04+ 系统
+          - 需要 Haswell+/Zen+ 以上 CPU（支持 x86-64-v3 指令集）
+          - CPU 漏洞缓解已启用，可在任意环境中安全使用
+          - 安装后需重启生效
+
+          ### 🛠️ 工具链
+          - GCC 15 (latest)、ccache (latest)、pahole (latest)、zstd (latest)、lz4 (latest)"
+
+            curl -sf -X PATCH \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}" \
+              -d "$(jq -n --arg body "$BODY" '{body: $body}')"
+            echo "已更新 Release 说明"
+          fi
+
