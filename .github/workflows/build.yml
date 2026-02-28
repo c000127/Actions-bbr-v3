@@ -280,8 +280,8 @@ jobs:
           KBUILD_BUILD_TIMESTAMP: ''
           KBUILD_BUILD_USER: c000127
           KBUILD_BUILD_HOST: github
-          # 跳过 .deb 内部压缩（节省 ~30 秒打包时间，安装时无影响）
-          KDEB_COMPRESS: none
+          # 使用 zstd 压缩 .deb 内部数据（压缩快、体积小）
+          KDEB_COMPRESS: zstd
         run: |
           set -euo pipefail
           BUILD_START=$(date +%s)
