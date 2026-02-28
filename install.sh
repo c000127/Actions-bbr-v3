@@ -529,9 +529,10 @@ clear
 print_separator
 echo -e "\033[1;35m(☆ω☆)✧*｡ 欢迎来到 BBR 管理脚本世界哒！ ✧*｡(☆ω☆)\033[0m"
 print_separator
-echo -e "\033[36m运行内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m"
-# 每次循环刷新已安装版本信息
+# 每次循环刷新状态信息
 INSTALLED_BBR_VER=$(get_installed_version)
+CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
 if [[ -n "$INSTALLED_BBR_VER" ]]; then
     INSTALLED_BRANCH=$(get_installed_branch)
     case "$INSTALLED_BRANCH" in
@@ -540,13 +541,10 @@ if [[ -n "$INSTALLED_BBR_VER" ]]; then
         beta) BRANCH_LABEL="Beta 测试 ⚠️" ;;
         *) BRANCH_LABEL="未知分支" ;;
     esac
-    echo -e "\033[36m已安装：  \033[0m\033[1;32m${INSTALLED_BBR_VER} ✔ (${BRANCH_LABEL})\033[0m"
+    echo -e "\033[36m内核：\033[0m\033[1;32m${INSTALLED_BBR_VER} ✔ (${BRANCH_LABEL})\033[0m"
 else
-    echo -e "\033[36m已安装：  \033[0m\033[33m未安装优化内核\033[0m"
+    echo -e "\033[36m内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m\033[33m（未安装优化内核）\033[0m"
 fi
-# 每次循环刷新拥塞控制状态
-CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
 echo -e "\033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
 print_separator
 echo -e "\033[1;33m作者：C000127  |  Fork of byJoey/Actions-bbr-v3"
