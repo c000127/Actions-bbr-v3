@@ -217,18 +217,74 @@ select_branch() {
     echo -e "\033[33m 1. Mainline（主线）\033[0m"
     echo -e "\033[33m 2. Stable（稳定）\033[0m"
     echo -e "\033[33m 3. Beta（测试 - 激进优化）\033[0m"
-    echo -n -e "\033[36m请选择 (1-3): \033[0m"
+    echo -e "\033[33m 0. 返回上一级\033[0m"
+    echo -n -e "\033[36m请选择 (0-3): \033[0m"
     read -r branch_choice
     case "$branch_choice" in
         1) SELECTED_BRANCH="mainline" ;;
         2) SELECTED_BRANCH="stable" ;;
         3) SELECTED_BRANCH="beta" ;;
+        0)
+            SELECTED_BRANCH=""
+            return 1
+            ;;
         *)
             echo -e "\033[31m无效选择，操作取消。\033[0m"
             SELECTED_BRANCH=""
             return 1
             ;;
     esac
+}
+
+# 函数：智能分支选择（已安装则默认更新同分支，切换需二次确认）
+smart_select_branch() {
+    local INSTALLED_BRANCH
+    INSTALLED_BRANCH=$(get_installed_branch)
+
+    if [[ -n "$INSTALLED_BRANCH" && "$INSTALLED_BRANCH" != "unknown" ]]; then
+        local BRANCH_DISPLAY
+        case "$INSTALLED_BRANCH" in
+            mainline) BRANCH_DISPLAY="Mainline 主线" ;;
+            stable) BRANCH_DISPLAY="Stable 稳定" ;;
+            beta) BRANCH_DISPLAY="Beta 测试" ;;
+            *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
+        esac
+        echo ""
+        echo -e "\033[36m检测到已安装 ${BRANCH_DISPLAY} 分支内核\033[0m"
+        echo -e "\033[33m 1. 更新当前分支 (${BRANCH_DISPLAY}) 到最新版\033[0m"
+        echo -e "\033[33m 2. 切换到其他分支\033[0m"
+        echo -e "\033[33m 0. 返回主菜单\033[0m"
+        echo -n -e "\033[36m请选择 (0-2，默认 1): \033[0m"
+        read -r update_choice
+        case "${update_choice:-1}" in
+            1)
+                SELECTED_BRANCH="$INSTALLED_BRANCH"
+                ;;
+            2)
+                select_branch || return 1
+                if [[ "$SELECTED_BRANCH" != "$INSTALLED_BRANCH" ]]; then
+                    echo ""
+                    echo -e "\033[31m⚠️ 您正在从 ${BRANCH_DISPLAY} 切换到 ${SELECTED_BRANCH} 分支\033[0m"
+                    echo -e "\033[33m   切换分支会卸载当前内核，安装新分支的内核。\033[0m"
+                    echo -n -e "\033[36m确认切换？(y/n): \033[0m"
+                    read -r confirm
+                    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                        echo -e "\033[33m已取消操作。\033[0m"
+                        return 1
+                    fi
+                fi
+                ;;
+            0)
+                return 1
+                ;;
+            *)
+                echo -e "\033[31m无效选择，操作取消。\033[0m"
+                return 1
+                ;;
+        esac
+    else
+        select_branch || return 1
+    fi
 }
 
 # 函数：智能更新引导加载程序
@@ -287,7 +343,7 @@ install_packages() {
 
 # 函数：检查并安装最新版本
 install_latest_version() {
-    select_branch || return 1
+    smart_select_branch || return 1
 
     echo -e "\033[36m正在从 GitHub 获取 ${SELECTED_BRANCH} 分支最新版本信息...\033[0m"
     BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
@@ -355,7 +411,7 @@ install_latest_version() {
 
 # 函数：安装指定版本
 install_specific_version() {
-    select_branch || return 1
+    smart_select_branch || return 1
 
     BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
     RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
@@ -400,8 +456,12 @@ install_specific_version() {
         fi
     done
 
-    echo -n -e "\033[36m请输入要安装的版本编号（例如 1）：\033[0m"
+    echo -n -e "\033[36m请输入要安装的版本编号（0 返回）：\033[0m"
     read -r CHOICE
+    
+    if [[ "$CHOICE" == "0" ]]; then
+        return 0
+    fi
     
     if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || (( CHOICE < 1 || CHOICE > ${#TAG_ARRAY[@]} )); then
         echo -e "\033[31m输入无效编号，取消操作。\033[0m"
