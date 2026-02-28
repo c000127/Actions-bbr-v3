@@ -462,6 +462,7 @@ jobs:
 
           # --- 内核模块 ZSTD 压缩 ---
           # 减少 /lib/modules 磁盘占用和模块加载时间
+          scripts/config --enable MODULE_COMPRESS
           scripts/config --enable MODULE_COMPRESS_ZSTD
           scripts/config --disable MODULE_COMPRESS_NONE
 
