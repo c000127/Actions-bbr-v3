@@ -411,103 +411,106 @@ install_latest_version() {
 
 # 函数：手动选择分支和版本安装（先选分支，再选版本，最后确认）
 install_specific_version() {
-    select_branch || return 1
+    while true; do
+        select_branch || return 0
 
-    BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
-    RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
-    if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
-        echo -e "\033[31m从 GitHub 获取版本信息失败。请检查网络连接或 API 状态。\033[0m"
-        return 1
-    fi
+        BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
+        RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
+        if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
+            echo -e "\033[31m从 GitHub 获取版本信息失败。请检查网络连接或 API 状态。\033[0m"
+            return 1
+        fi
 
-    local ARCH_FILTER=""
-    [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
-    [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
-    
-    # 构建 tag 匹配正则（与 install_latest_version 相同逻辑）
-    local TAG_REGEX
-    if [[ "$SELECTED_BRANCH" == "beta" ]]; then
-        TAG_REGEX="beta"
-    else
-        TAG_REGEX="${SELECTED_BRANCH}(?!.*beta)"
-    fi
-
-    MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$TAG_REGEX" \
-        '.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch)) | .tag_name')
-
-    if [[ -z "$MATCH_TAGS" ]]; then
-        echo -e "\033[31m未找到适合当前架构的 ${SELECTED_BRANCH} 分支版本。\033[0m"
-        return 1
-    fi
-
-    echo -e "\033[36m以下为 ${SELECTED_BRANCH} 分支适用于当前架构的版本：\033[0m"
-    IFS=$'\n' read -rd '' -a TAG_ARRAY <<<"$MATCH_TAGS"
-    local INSTALLED_VERSION
-    INSTALLED_VERSION=$(get_installed_version)
-
-    for i in "${!TAG_ARRAY[@]}"; do
-        local tag_ver="${TAG_ARRAY[$i]#${ARCH_FILTER}-}"
-        local norm_ver
-        norm_ver=$(normalize_version "$tag_ver")
-        if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$norm_ver" ]]; then
-            echo -e "\033[33m $((i+1)). $tag_ver \033[1;32m← 已安装\033[0m"
+        local ARCH_FILTER=""
+        [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
+        [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
+        
+        # 构建 tag 匹配正则（与 install_latest_version 相同逻辑）
+        local TAG_REGEX
+        if [[ "$SELECTED_BRANCH" == "beta" ]]; then
+            TAG_REGEX="beta"
         else
-            echo -e "\033[33m $((i+1)). $tag_ver\033[0m"
+            TAG_REGEX="${SELECTED_BRANCH}(?!.*beta)"
         fi
-    done
 
-    echo -n -e "\033[36m请输入要安装的版本编号（0 返回）：\033[0m"
-    read -r CHOICE
-    
-    if [[ "$CHOICE" == "0" ]]; then
+        MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$TAG_REGEX" \
+            '.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch)) | .tag_name')
+
+        if [[ -z "$MATCH_TAGS" ]]; then
+            echo -e "\033[31m未找到适合当前架构的 ${SELECTED_BRANCH} 分支版本。\033[0m"
+            return 1
+        fi
+
+        echo -e "\033[36m以下为 ${SELECTED_BRANCH} 分支适用于当前架构的版本：\033[0m"
+        IFS=$'\n' read -rd '' -a TAG_ARRAY <<<"$MATCH_TAGS"
+        local INSTALLED_VERSION
+        INSTALLED_VERSION=$(get_installed_version)
+
+        for i in "${!TAG_ARRAY[@]}"; do
+            local tag_ver="${TAG_ARRAY[$i]#${ARCH_FILTER}-}"
+            local norm_ver
+            norm_ver=$(normalize_version "$tag_ver")
+            if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$norm_ver" ]]; then
+                echo -e "\033[33m $((i+1)). $tag_ver \033[1;32m← 已安装\033[0m"
+            else
+                echo -e "\033[33m $((i+1)). $tag_ver\033[0m"
+            fi
+        done
+
+        echo -n -e "\033[36m请输入要安装的版本编号（0 返回）：\033[0m"
+        read -r CHOICE
+        
+        if [[ "$CHOICE" == "0" ]]; then
+            continue  # 返回分支选择
+        fi
+        
+        if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || (( CHOICE < 1 || CHOICE > ${#TAG_ARRAY[@]} )); then
+            echo -e "\033[31m输入无效编号，取消操作。\033[0m"
+            continue  # 返回分支选择
+        fi
+        
+        INDEX=$((CHOICE-1))
+        SELECTED_TAG="${TAG_ARRAY[$INDEX]}"
+        local selected_ver="${SELECTED_TAG#${ARCH_FILTER}-}"
+        echo -e "\033[36m已选择版本：\033[0m\033[1;32m$selected_ver\033[0m"
+
+        # 检查是否切换分支，需二次确认
+        local INSTALLED_BRANCH
+        INSTALLED_BRANCH=$(get_installed_branch)
+        if [[ -n "$INSTALLED_BRANCH" && "$INSTALLED_BRANCH" != "unknown" && "$INSTALLED_BRANCH" != "$SELECTED_BRANCH" ]]; then
+            local BRANCH_DISPLAY
+            case "$INSTALLED_BRANCH" in
+                mainline) BRANCH_DISPLAY="Mainline 主线" ;;
+                stable) BRANCH_DISPLAY="Stable 稳定" ;;
+                beta) BRANCH_DISPLAY="Beta 测试" ;;
+                *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
+            esac
+            echo ""
+            echo -e "\033[31m⚠️ 您正在从 ${BRANCH_DISPLAY} 切换到 ${SELECTED_BRANCH} 分支\033[0m"
+            echo -e "\033[33m   切换分支会卸载当前内核，安装新分支的内核。\033[0m"
+            echo -n -e "\033[36m确认切换？(y/n): \033[0m"
+            read -r confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                echo -e "\033[33m已取消操作。\033[0m"
+                return 0
+            fi
+        fi
+
+        ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$SELECTED_TAG" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
+        
+        rm -f "$DOWNLOAD_DIR"/linux-*.deb
+        
+        for URL in $ASSET_URLS; do
+            [[ "$URL" == *"linux-libc-dev"* ]] && continue
+            local FILENAME
+            FILENAME=$(basename "$URL")
+            echo -e "\033[36m下载中：$FILENAME\033[0m"
+            wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$FILENAME\033[0m"; return 1; }
+        done
+
+        install_packages
         return 0
-    fi
-    
-    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || (( CHOICE < 1 || CHOICE > ${#TAG_ARRAY[@]} )); then
-        echo -e "\033[31m输入无效编号，取消操作。\033[0m"
-        return 1
-    fi
-    
-    INDEX=$((CHOICE-1))
-    SELECTED_TAG="${TAG_ARRAY[$INDEX]}"
-    local selected_ver="${SELECTED_TAG#${ARCH_FILTER}-}"
-    echo -e "\033[36m已选择版本：\033[0m\033[1;32m$selected_ver\033[0m"
-
-    # 检查是否切换分支，需二次确认
-    local INSTALLED_BRANCH
-    INSTALLED_BRANCH=$(get_installed_branch)
-    if [[ -n "$INSTALLED_BRANCH" && "$INSTALLED_BRANCH" != "unknown" && "$INSTALLED_BRANCH" != "$SELECTED_BRANCH" ]]; then
-        local BRANCH_DISPLAY
-        case "$INSTALLED_BRANCH" in
-            mainline) BRANCH_DISPLAY="Mainline 主线" ;;
-            stable) BRANCH_DISPLAY="Stable 稳定" ;;
-            beta) BRANCH_DISPLAY="Beta 测试" ;;
-            *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
-        esac
-        echo ""
-        echo -e "\033[31m⚠️ 您正在从 ${BRANCH_DISPLAY} 切换到 ${SELECTED_BRANCH} 分支\033[0m"
-        echo -e "\033[33m   切换分支会卸载当前内核，安装新分支的内核。\033[0m"
-        echo -n -e "\033[36m确认切换？(y/n): \033[0m"
-        read -r confirm
-        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-            echo -e "\033[33m已取消操作。\033[0m"
-            return 0
-        fi
-    fi
-
-    ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$SELECTED_TAG" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
-    
-    rm -f "$DOWNLOAD_DIR"/linux-*.deb
-    
-    for URL in $ASSET_URLS; do
-        [[ "$URL" == *"linux-libc-dev"* ]] && continue
-        local FILENAME
-        FILENAME=$(basename "$URL")
-        echo -e "\033[36m下载中：$FILENAME\033[0m"
-        wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$FILENAME\033[0m"; return 1; }
     done
-
-    install_packages
 }
 
 # 美化输出的分隔线
@@ -520,11 +523,15 @@ print_separator() {
 RUNNING_KERNEL=$(uname -r)
 INSTALLED_BBR_VER=$(get_installed_version)
 
+while true; do
+
 clear
 print_separator
 echo -e "\033[1;35m(☆ω☆)✧*｡ 欢迎来到 BBR 管理脚本世界哒！ ✧*｡(☆ω☆)\033[0m"
 print_separator
 echo -e "\033[36m运行内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m"
+# 每次循环刷新已安装版本信息
+INSTALLED_BBR_VER=$(get_installed_version)
 if [[ -n "$INSTALLED_BBR_VER" ]]; then
     INSTALLED_BRANCH=$(get_installed_branch)
     case "$INSTALLED_BRANCH" in
@@ -537,6 +544,9 @@ if [[ -n "$INSTALLED_BBR_VER" ]]; then
 else
     echo -e "\033[36m已安装：  \033[0m\033[33m未安装优化内核\033[0m"
 fi
+# 每次循环刷新拥塞控制状态
+CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
 echo -e "\033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
 print_separator
 echo -e "\033[1;33m作者：C000127  |  Fork of byJoey/Actions-bbr-v3"
@@ -554,10 +564,16 @@ echo -e "\033[33m 8. 🗑️  卸载优化内核\033[0m"
 print_separator
 echo -e "\033[33m 9. 🛠️  查看已安装内核版本类型\033[0m"
 print_separator
-echo -n -e "\033[36m请选择一个操作 (1-9) (｡・ω・｡): \033[0m"
+echo -e "\033[33m 0. 🚪 退出脚本\033[0m"
+print_separator
+echo -n -e "\033[36m请选择一个操作 (0-9) (｡・ω・｡): \033[0m"
 read -r ACTION
 
 case "$ACTION" in
+    0)
+        echo -e "\033[1;35m(｡･ω･｡)ﾉ 拜拜~ 下次再见哦！\033[0m"
+        exit 0
+        ;;
     1)
         echo -e "\033[1;32m٩(｡•́‿•̀｡)۶ 您选择了安装或更新内核！\033[0m"
         install_latest_version
@@ -576,7 +592,10 @@ case "$ACTION" in
         fi
         if [[ -z "$BBR_MODULE_INFO" ]]; then
             echo -e "\033[31m(⊙﹏⊙) 未加载 tcp_bbr 模块，无法检查版本。请先安装内核并重启。\033[0m"
-            exit 1
+            echo ""
+            echo -n -e "\033[36m按回车键返回主菜单...\033[0m"
+            read -r
+            continue
         fi
         BBR_VERSION=$(echo "$BBR_MODULE_INFO" | awk '/^version:/ {print $2}')
         if [[ "$BBR_VERSION" == "3" ]]; then
@@ -671,6 +690,13 @@ case "$ACTION" in
         echo -e "\033[36m当前运行内核：\033[0m\033[1;32m$(uname -r)\033[0m"
         ;;
     *)
-        echo -e "\033[31m(￣▽￣)ゞ 无效的选项，请输入 1-9 之间的数字哦~\033[0m"
+        echo -e "\033[31m(￣▽￣)ゞ 无效的选项，请输入 0-9 之间的数字哦~\033[0m"
         ;;
 esac
+
+# 操作完成后暂停，让用户查看输出
+echo ""
+echo -n -e "\033[36m按回车键返回主菜单...\033[0m"
+read -r
+
+done  # while true
