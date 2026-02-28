@@ -240,9 +240,9 @@ smart_select_branch() {
     if [[ -n "$INSTALLED_BRANCH" && "$INSTALLED_BRANCH" != "unknown" ]]; then
         local BRANCH_DISPLAY
         case "$INSTALLED_BRANCH" in
-            mainline) BRANCH_DISPLAY="Mainline 主线" ;;
-            stable) BRANCH_DISPLAY="Stable 稳定" ;;
-            beta) BRANCH_DISPLAY="Beta 测试" ;;
+            mainline) BRANCH_DISPLAY="Mainline（主线）" ;;
+            stable) BRANCH_DISPLAY="Stable（稳定）" ;;
+            beta) BRANCH_DISPLAY="Beta（测试 - 激进优化）" ;;
             *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
         esac
         echo ""
@@ -476,9 +476,9 @@ install_specific_version() {
         if [[ -n "$INSTALLED_BRANCH" && "$INSTALLED_BRANCH" != "unknown" && "$INSTALLED_BRANCH" != "$SELECTED_BRANCH" ]]; then
             local BRANCH_DISPLAY
             case "$INSTALLED_BRANCH" in
-                mainline) BRANCH_DISPLAY="Mainline 主线" ;;
-                stable) BRANCH_DISPLAY="Stable 稳定" ;;
-                beta) BRANCH_DISPLAY="Beta 测试" ;;
+                mainline) BRANCH_DISPLAY="Mainline（主线）" ;;
+                stable) BRANCH_DISPLAY="Stable（稳定）" ;;
+                beta) BRANCH_DISPLAY="Beta（测试 - 激进优化）" ;;
                 *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
             esac
             echo ""
@@ -531,9 +531,9 @@ CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
 if [[ -n "$INSTALLED_BBR_VER" ]]; then
     INSTALLED_BRANCH=$(get_installed_branch)
     case "$INSTALLED_BRANCH" in
-        mainline) BRANCH_LABEL="Mainline 主线" ;;
-        stable) BRANCH_LABEL="Stable 稳定" ;;
-        beta) BRANCH_LABEL="Beta 测试 ⚠️" ;;
+        mainline) BRANCH_LABEL="Mainline（主线）" ;;
+        stable) BRANCH_LABEL="Stable（稳定）" ;;
+        beta) BRANCH_LABEL="Beta（测试 - 激进优化）" ;;
         *) BRANCH_LABEL="未知分支" ;;
     esac
     echo -e "\033[36m内核版本：\033[0m\033[1;32m${INSTALLED_BBR_VER}\033[0m"
