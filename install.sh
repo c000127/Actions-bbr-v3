@@ -53,10 +53,6 @@ if [[ "$ARCH" != "aarch64" && "$ARCH" != "x86_64" ]]; then
     exit 1
 fi
 
-# 获取当前 BBR 状态
-CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
-
 # 内核品牌标识（用于匹配已安装的内核包）
 KERNEL_BRAND="c000127-bbrv3"
 
@@ -521,7 +517,6 @@ print_separator() {
 # --- 主要执行流程 ---
 
 RUNNING_KERNEL=$(uname -r)
-INSTALLED_BBR_VER=$(get_installed_version)
 
 while true; do
 
