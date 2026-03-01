@@ -82,6 +82,11 @@ clean_sysctl_conf() {
     sudo sed -i '/net.ipv4.tcp_congestion_control/d' "$SYSCTL_CONF"
     sudo sed -i '/net.ipv4.tcp_ecn/d' "$SYSCTL_CONF"
     sudo sed -i '/net.ipv4.tcp_fastopen/d' "$SYSCTL_CONF"
+    # Beta 调优项
+    sudo sed -i '/net.ipv4.tcp_slow_start_after_idle/d' "$SYSCTL_CONF"
+    sudo sed -i '/net.ipv4.tcp_notsent_lowat/d' "$SYSCTL_CONF"
+    sudo sed -i '/net.ipv4.tcp_mtu_probing/d' "$SYSCTL_CONF"
+    sudo sed -i '/^# Beta/d' "$SYSCTL_CONF"
 }
 
 # 函数：加载队列调度模块
@@ -118,13 +123,22 @@ ask_to_save() {
     # 首先尝试加载队列调度模块
     load_qdisc_module "$QDISC"
     
+    # 检测是否为 Beta 分支（决定是否应用额外调优）
+    local IS_BETA=false
+    [[ "$(get_installed_branch)" == "beta" ]] && IS_BETA=true
+    
     # 立即应用设置
     echo -e "\033[36m正在应用配置...\033[0m"
     sudo sysctl -w net.core.default_qdisc="$QDISC" > /dev/null 2>&1
     sudo sysctl -w net.ipv4.tcp_congestion_control="$ALGO" > /dev/null 2>&1
-    # BBRv3 搭配优化：ECN 被动模式 + TCP 快速打开（客户端+服务端）
-    sudo sysctl -w net.ipv4.tcp_ecn=2 > /dev/null 2>&1
-    sudo sysctl -w net.ipv4.tcp_fastopen=0x203 > /dev/null 2>&1
+    if $IS_BETA; then
+        # Beta 分支：完整网络调优（ECN + TFO + 缓冲区 + 更多）
+        _apply_beta_sysctl_live
+    else
+        # 通用：ECN 被动模式 + TCP 快速打开
+        sudo sysctl -w net.ipv4.tcp_ecn=2 > /dev/null 2>&1
+        sudo sysctl -w net.ipv4.tcp_fastopen=1027 > /dev/null 2>&1
+    fi
     
     # 验证是否生效
     NEW_QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null)
@@ -148,9 +162,12 @@ ask_to_save() {
         clean_sysctl_conf
         echo "net.core.default_qdisc=$QDISC" | sudo tee -a "$SYSCTL_CONF" > /dev/null
         echo "net.ipv4.tcp_congestion_control=$ALGO" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-        # BBRv3 搭配优化
-        echo "net.ipv4.tcp_ecn=2" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-        echo "net.ipv4.tcp_fastopen=515" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+        if $IS_BETA; then
+            _write_beta_sysctl_conf
+        else
+            echo "net.ipv4.tcp_ecn=2" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+            echo "net.ipv4.tcp_fastopen=1027" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+        fi
         sudo sysctl --system > /dev/null 2>&1
         
         # 配置模块开机自动加载（fq 和 fq_codel 是内置的不需要）
@@ -164,6 +181,64 @@ ask_to_save() {
         fi
     else
         echo -e "\033[33m(⌒_⌒;) 好吧，没有永久保存，重启后会恢复原设置呢~\033[0m"
+    fi
+}
+
+# 函数：立即应用 Beta 专属 sysctl 调优（内部使用）
+# 缓冲区值与 kernel.sh 对齐；tcp_ecn=2 为 BBRv3 关键调优项保留
+_apply_beta_sysctl_live() {
+    sudo sysctl -w net.ipv4.tcp_ecn=2 > /dev/null 2>&1
+    sudo sysctl -w net.ipv4.tcp_fastopen=1027 > /dev/null 2>&1
+    sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 > /dev/null 2>&1
+    sudo sysctl -w net.ipv4.tcp_notsent_lowat=16384 > /dev/null 2>&1
+}
+
+# 函数：将 Beta 调优写入 sysctl 配置文件（追加到 SYSCTL_CONF）
+_write_beta_sysctl_conf() {
+    {
+        echo "# Beta 专属网络调优"
+        echo "net.ipv4.tcp_ecn=2"
+        echo "net.ipv4.tcp_fastopen=1027"
+        echo "net.ipv4.tcp_slow_start_after_idle=0"
+        echo "net.ipv4.tcp_notsent_lowat=16384"
+    } | sudo tee -a "$SYSCTL_CONF" > /dev/null
+}
+
+# 函数：Beta 专属网络调优（独立菜单选项）
+apply_beta_sysctl() {
+    local INSTALLED_BRANCH
+    INSTALLED_BRANCH=$(get_installed_branch)
+    if [[ "$INSTALLED_BRANCH" != "beta" ]]; then
+        echo -e "\033[33m⚠ 未检测到 Beta 分支内核（当前：${INSTALLED_BRANCH:-"未安装"}）\033[0m"
+        echo -e "\033[33m  这些调优参数在任何内核上均可使用，但为 Beta 内核专门设计。\033[0m"
+        echo -n -e "\033[36m仍要继续？(y/n): \033[0m"
+        read -r confirm
+        [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return 0
+    fi
+    
+    _apply_beta_sysctl_live
+    
+    echo -e "\033[1;32m✔ Beta 网络调优已应用！\033[0m"
+    echo -e "\033[36m  ┌ tcp_ecn=2                     ECN 被动模式（BBRv3 关键搭配）\033[0m"
+    echo -e "\033[36m  ├ tcp_fastopen=1027              TFO 全开（免 Cookie）\033[0m"
+    echo -e "\033[36m  ├ tcp_slow_start_after_idle=0    禁用空闲慢启动\033[0m"
+    echo -e "\033[36m  └ tcp_notsent_lowat=16384        减少缓冲膨胀\033[0m"
+    
+    echo -n -e "\033[36m(｡♥‿♥｡) 要永久保存这些设置吗？(y/n): \033[0m"
+    read -r SAVE
+    if [[ "$SAVE" == "y" || "$SAVE" == "Y" ]]; then
+        # 保留当前 qdisc 和拥塞控制设置
+        local current_qdisc current_algo
+        current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+        current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+        clean_sysctl_conf
+        echo "net.core.default_qdisc=${current_qdisc}" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+        echo "net.ipv4.tcp_congestion_control=${current_algo}" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+        _write_beta_sysctl_conf
+        sudo sysctl --system > /dev/null 2>&1
+        echo -e "\033[1;32m(☆^ー^☆) Beta 调优已永久保存！\033[0m"
+    else
+        echo -e "\033[33m(⌒_⌒;) 未永久保存，重启后会恢复原设置\033[0m"
     fi
 }
 
@@ -348,6 +423,22 @@ install_packages() {
         NEW_KERNEL_VER=$(get_installed_version)
         echo -e "\033[36m  新内核：    \033[1;32m${NEW_KERNEL_VER:-"未知"}\033[0m"
         echo -e "\033[33m  重启前：    $(uname -r)（旧内核仍在运行）\033[0m"
+        # Beta 分支：自动配置 BBR + FQ + 网络调优
+        if [[ "$(get_installed_branch)" == "beta" ]]; then
+            echo ""
+            echo -e "\033[1;36m  🧪 Beta 分支：自动配置网络优化\033[0m"
+            sudo sysctl -w net.core.default_qdisc=fq > /dev/null 2>&1
+            sudo sysctl -w net.ipv4.tcp_congestion_control=bbr > /dev/null 2>&1
+            _apply_beta_sysctl_live
+            clean_sysctl_conf
+            echo "net.core.default_qdisc=fq" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+            echo "net.ipv4.tcp_congestion_control=bbr" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+            _write_beta_sysctl_conf
+            sudo sysctl --system > /dev/null 2>&1
+            sudo rm -f "$MODULES_CONF"
+            echo -e "\033[1;32m  ✔ 已自动配置：BBR + FQ + Beta 网络调优\033[0m"
+            echo -e "\033[36m    配置已保存到 $SYSCTL_CONF\033[0m"
+        fi
         echo -e "\033[33m  ⚠ 需要重启后生效\033[0m"
         echo -n -e "\033[33m是否立即重启？ (y/n): \033[0m"
         read -r REBOOT_NOW
@@ -576,17 +667,20 @@ echo -e "\033[32m  ┌─\033[1;32m 🚀 内核管理\033[0m"
 echo -e "\033[32m  │\033[0m    \033[33m1.\033[0m \033[36m安装或更新 VPS 优化内核\033[0m"
 echo -e "\033[32m  │\033[0m    \033[33m2.\033[0m \033[36m手动选择分支和版本安装\033[0m"
 echo -e "\033[32m  │\033[0m    \033[33m3.\033[0m \033[36m查看内核与 BBR 状态\033[0m"
-echo -e "\033[32m  └\033[0m    \033[33m8.\033[0m \033[36m卸载优化内核\033[0m"
+echo -e "\033[32m  └\033[0m    \033[33m4.\033[0m \033[36m卸载优化内核\033[0m"
 echo ""
 echo -e "\033[35m  ┌─\033[1;35m ⚡ 网络加速\033[0m"
-echo -e "\033[35m  │\033[0m    \033[33m4.\033[0m \033[36m启用 BBR + FQ\033[0m"
-echo -e "\033[35m  │\033[0m    \033[33m5.\033[0m \033[36m启用 BBR + FQ_CODEL\033[0m"
-echo -e "\033[35m  │\033[0m    \033[33m6.\033[0m \033[36m启用 BBR + FQ_PIE\033[0m"
-echo -e "\033[35m  └\033[0m    \033[33m7.\033[0m \033[36m启用 BBR + CAKE\033[0m"
+echo -e "\033[35m  │\033[0m    \033[33m5.\033[0m \033[36m启用 BBR + FQ\033[0m"
+echo -e "\033[35m  │\033[0m    \033[33m6.\033[0m \033[36m启用 BBR + FQ_CODEL\033[0m"
+echo -e "\033[35m  │\033[0m    \033[33m7.\033[0m \033[36m启用 BBR + FQ_PIE\033[0m"
+echo -e "\033[35m  └\033[0m    \033[33m8.\033[0m \033[36m启用 BBR + CAKE\033[0m"
+echo ""
+echo -e "\033[31m  ┌─\033[1;31m 🧪 Beta 专属\033[0m"
+echo -e "\033[31m  └\033[0m    \033[33m9.\033[0m \033[36m应用 Beta 网络调优（ECN/TFO/缓冲区）\033[0m"
 echo ""
 echo -e "\033[33m  0. 🚪 退出脚本\033[0m"
 echo ""
-echo -n -e "\033[36m请选择一个操作 (0-8) (｡・ω・｡): \033[0m"
+echo -n -e "\033[36m请选择一个操作 (0-9) (｡・ω・｡): \033[0m"
 read -r ACTION
 
 case "$ACTION" in
@@ -673,36 +767,12 @@ case "$ACTION" in
             if [[ "$BBR_VERSION" == "3" && "$CURRENT_ALGO" == "bbr" ]]; then
                 echo -e "\033[34m  └\033[0m    \033[1;32mヽ(✿ﾟ▽ﾟ)ノ BBR v3 已正确安装并生效！\033[0m"
             else
-                echo -e "\033[34m  └\033[0m    \033[33mBBR v3 未完全生效，请安装内核并重启后使用选项 4-7 启用\033[0m"
+                echo -e "\033[34m  └\033[0m    \033[33mBBR v3 未完全生效，请安装内核并重启后使用选项 5-8 启用\033[0m"
             fi
         fi
         ;;
     4)
-        echo -e "\033[1;32m(ﾉ◕ヮ◕)ﾉ*:･ﾟ✧ 使用 BBR + FQ 加速！\033[0m"
-        ALGO="bbr"
-        QDISC="fq"
-        ask_to_save
-        ;;
-    5)
-        echo -e "\033[1;32m(๑•̀ㅂ•́)و✧ 使用 BBR + FQ_CODEL 加速！\033[0m"
-        ALGO="bbr"
-        QDISC="fq_codel"
-        ask_to_save
-        ;;
-    6)
-        echo -e "\033[1;32m٩(•‿•)۶ 使用 BBR + FQ_PIE 加速！\033[0m"
-        ALGO="bbr"
-        QDISC="fq_pie"
-        ask_to_save
-        ;;
-    7)
-        echo -e "\033[1;32m(ﾉ≧∀≦)ﾉ 使用 BBR + CAKE 加速！\033[0m"
-        ALGO="bbr"
-        QDISC="cake"
-        ask_to_save
-        ;;
-    8)
-        echo -e "\033[1;32mヽ(・∀・)ノ 您选择了卸载 BBR 内核！\033[0m"
+        echo -e "\033[1;32mヽ(・∀・)ノ 您选择了卸载优化内核！\033[0m"
         PACKAGES_TO_REMOVE=$(dpkg -l | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
         if [[ -n "$PACKAGES_TO_REMOVE" ]]; then
             echo -e "\033[36m将要卸载以下内核包: \033[33m$PACKAGES_TO_REMOVE\033[0m"
@@ -713,8 +783,36 @@ case "$ACTION" in
             echo -e "\033[33m未找到由本脚本安装的 '$KERNEL_BRAND' 内核包。\033[0m"
         fi
         ;;
+    5)
+        echo -e "\033[1;32m(ﾉ◕ヮ◕)ﾉ*:･ﾟ✧ 使用 BBR + FQ 加速！\033[0m"
+        ALGO="bbr"
+        QDISC="fq"
+        ask_to_save
+        ;;
+    6)
+        echo -e "\033[1;32m(๑•̀ㅂ•́)و✧ 使用 BBR + FQ_CODEL 加速！\033[0m"
+        ALGO="bbr"
+        QDISC="fq_codel"
+        ask_to_save
+        ;;
+    7)
+        echo -e "\033[1;32m٩(•‿•)۶ 使用 BBR + FQ_PIE 加速！\033[0m"
+        ALGO="bbr"
+        QDISC="fq_pie"
+        ask_to_save
+        ;;
+    8)
+        echo -e "\033[1;32m(ﾉ≧∀≦)ﾉ 使用 BBR + CAKE 加速！\033[0m"
+        ALGO="bbr"
+        QDISC="cake"
+        ask_to_save
+        ;;
+    9)
+        echo -e "\033[1;32m(★‿★) 应用 Beta 专属网络调优！\033[0m"
+        apply_beta_sysctl
+        ;;
     *)
-        echo -e "\033[31m(￣▽￣)ゞ 无效输入，请输入 0-8 之间的数字哦~\033[0m"
+        echo -e "\033[31m(￣▽￣)ゞ 无效输入，请输入 0-9 之间的数字哦~\033[0m"
         continue
         ;;
 esac
