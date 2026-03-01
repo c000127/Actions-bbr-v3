@@ -639,9 +639,8 @@ jobs:
           scripts/config --enable CC_OPTIMIZE_FOR_PERFORMANCE_O3
 
           # --- ECN 显式拥塞通知（BBRv3 关键搭配优化）---
-          # BBRv3 + ECN 实现精确拥塞感知，减少重传 10-15%
-          scripts/config --enable TCP_ECN
-          scripts/config --set-val DEFAULT_TCP_ECN 2
+          # 7.0 内核中 ECN 已内置于 TCP 协议栈，无独立 kconfig 选项
+          # 运行时通过 sysctl net.ipv4.tcp_ecn=2 启用（推荐在 install.sh 中配置）
 
           # --- MGLRU 多代 LRU 页面回收 ---
           # 页面回收效率提升 30-50%（Google 数据），对内存受限 VPS 有益
@@ -657,7 +656,8 @@ jobs:
           scripts/config --enable DAMON_RECLAIM
 
           # --- TCP 快速打开（减少连接建立一个 RTT）---
-          scripts/config --enable TCP_FASTOPEN
+          # 7.0 内核中 TFO 已内置于 INET 协议栈，无独立 kconfig 选项
+          # 运行时通过 sysctl net.ipv4.tcp_fastopen=0x203 启用
 
           # --- 策略路由（多 IP VPS 场景）---
           scripts/config --enable IP_MULTIPLE_TABLES
@@ -667,9 +667,8 @@ jobs:
           # --- BPF 流解析加速（TCP 流处理）---
           scripts/config --enable BPF_STREAM_PARSER
 
-          # --- BPFILTER 高性能防火墙 ---
-          # 将 iptables 规则转译为 BPF 程序，获得 BPF 级性能
-          scripts/config --enable BPFILTER
+          # --- BPFILTER（已从 6.7+ 内核移除）---
+          # 该功能已从内核移除，替代方案：直接使用 nftables 或 BPF/XDP
 
           # --- NAP CPU 空闲管理器 ---
           # 浅睡眠策略，VPS 网络包唤醒延迟从 100-200μs 降至 ~10μs
@@ -719,25 +718,23 @@ jobs:
           cp .config ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
           echo "=== 关键配置验证 ==="
-          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_CPU_MITIGATIONS=|CONFIG_HZ=|CONFIG_NR_CPUS=|CONFIG_DEBUG_INFO_BTF=|CONFIG_IA32_EMULATION=|CONFIG_MODULE_COMPRESS_ZSTD=|CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=|CONFIG_ZSWAP_EXCLUSIVE_LOADS=|CONFIG_SCHED_CLASS_EXT=|CONFIG_SCHED_BORE=|CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=|CONFIG_TCP_ECN=|CONFIG_LRU_GEN=|CONFIG_DAMON=|CONFIG_TCP_FASTOPEN=|CONFIG_BPFILTER=|CONFIG_CPU_IDLE_GOV_(NAP|REFLEX)=|CONFIG_PREEMPT=|CONFIG_CONTEXT_TRACKING=|CONFIG_INET_DIAG=|CONFIG_NET_SCH_FQ_CODEL=' .config || true
+          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_CPU_MITIGATIONS=|CONFIG_HZ=|CONFIG_NR_CPUS=|CONFIG_DEBUG_INFO_BTF=|CONFIG_IA32_EMULATION=|CONFIG_MODULE_COMPRESS_ZSTD=|CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=|CONFIG_ZSWAP_EXCLUSIVE_LOADS=|CONFIG_SCHED_CLASS_EXT=|CONFIG_SCHED_BORE=|CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=|CONFIG_LRU_GEN=|CONFIG_DAMON=|CONFIG_CPU_IDLE_GOV_(NAP|REFLEX)=|CONFIG_PREEMPT=|CONFIG_CONTEXT_TRACKING=|CONFIG_INET_DIAG=|CONFIG_NET_SCH_FQ_CODEL=' .config || true
 
           echo "=== 检查关键配置是否生效 ==="
           UNEXPECTED=0
-          grep -q 'CONFIG_KERNEL_ZSTD=y' .config || { echo "::warning::CONFIG_KERNEL_ZSTD 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_NO_HZ_FULL=y' .config || { echo "::warning::CONFIG_NO_HZ_FULL 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_DEBUG_INFO_BTF=y' .config || { echo "::warning::CONFIG_DEBUG_INFO_BTF 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_HZ=1000' .config || { echo "::warning::CONFIG_HZ=1000 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_CPU_MITIGATIONS=y' .config || { echo "::warning::CPU_MITIGATIONS 未启用！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y' .config || { echo "::warning::CC_OPTIMIZE_FOR_PERFORMANCE_O3 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_TCP_ECN=y' .config || { echo "::warning::TCP_ECN 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_LRU_GEN=y' .config || { echo "::warning::LRU_GEN (MGLRU) 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_DAMON=y' .config || { echo "::warning::DAMON 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_TCP_FASTOPEN=y' .config || { echo "::warning::TCP_FASTOPEN 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_PREEMPT=y' .config || { echo "::warning::PREEMPT（完全抢占）未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_CONTEXT_TRACKING=y' .config || { echo "::warning::CONTEXT_TRACKING 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_KERNEL_ZSTD=y' .config || { echo "::warning::CONFIG_KERNEL_ZSTD 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_NO_HZ_FULL=y' .config || { echo "::warning::CONFIG_NO_HZ_FULL 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_DEBUG_INFO_BTF=y' .config || { echo "::warning::CONFIG_DEBUG_INFO_BTF 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_HZ=1000' .config || { echo "::warning::CONFIG_HZ=1000 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_CPU_MITIGATIONS=y' .config || { echo "::warning::CPU_MITIGATIONS 未启用！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y' .config || { echo "::warning::CC_OPTIMIZE_FOR_PERFORMANCE_O3 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_LRU_GEN=y' .config || { echo "::warning::LRU_GEN (MGLRU) 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_DAMON=y' .config || { echo "::warning::DAMON 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_PREEMPT=y' .config || { echo "::warning::PREEMPT（完全抢占）未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
+          grep -q 'CONFIG_CONTEXT_TRACKING=y' .config || { echo "::warning::CONTEXT_TRACKING 未生效！"; UNEXPECTED=$((UNEXPECTED+1)); }
           if [ $UNEXPECTED -eq 0 ]; then
             echo "✅ 全部关键配置验证通过"
           else
@@ -834,7 +831,7 @@ jobs:
           | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
           | 架构 | ${{ matrix.arch }} (x86-64-v3, 需 Haswell+/Zen+) |
           ${{ env.PATCH_LINES }}
-          | 拥塞控制 | BBRv3 (built-in) + ECN |
+          | 拥塞控制 | BBRv3 (built-in) + ECN (sysctl) |
           | 默认 Qdisc | fq |
           | 调度器 | BORE (Burst-Oriented Response Enhancer) |
           | 定时器 | **NO_HZ_FULL** (全无滴答) |
@@ -853,7 +850,7 @@ jobs:
           ### 🚀 激进优化
           - **BORE 调度器** — 突发性感知调度，网络服务延迟降低 15-30%
           - **GCC -O3** — 激进循环展开/内联/向量化，网络栈吞吐提升 3-8%
-          - **ECN (显式拥塞通知)** — BBRv3 精确拥塞感知，减少重传 10-15%
+          - **ECN (显式拥塞通知)** — BBRv3 精确拥塞感知，减少重传 10-15%（install.sh 自动配置 sysctl）
           - **NO_HZ_FULL** — 忙碌 CPU 免定时器中断，高吞吐负载无抖动
           - **PREEMPT（完全抢占）** — 最低调度延迟，网络服务响应更快
           - **MGLRU 多代 LRU** — 页面回收效率提升 30-50%（Google 数据）
@@ -869,7 +866,7 @@ jobs:
 
           ### 🔧 VPS 优化
           - BPF JIT 始终开启、TCP-AO (RFC 5925)、MPTCP、XDP Sockets
-          - TCP_FASTOPEN（减少连接建立一个 RTT）、BPFILTER（高性能防火墙）
+          - TCP_FASTOPEN（sysctl 自动配置，减少连接建立一个 RTT）
           - BPF_STREAM_PARSER（TCP 流解析加速）、策略路由（多 IP 支持）
           - INET_DIAG（ss/ip 诊断加速）、FQ-CoDel（缓冲膨胀控制）
           - ZRAM 多重压缩 + 写回、zswap(ZSTD+exclusive)、HALTPOLL_CPUIDLE

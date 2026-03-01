@@ -80,6 +80,8 @@ clean_sysctl_conf() {
     sudo touch "$SYSCTL_CONF"
     sudo sed -i '/net.core.default_qdisc/d' "$SYSCTL_CONF"
     sudo sed -i '/net.ipv4.tcp_congestion_control/d' "$SYSCTL_CONF"
+    sudo sed -i '/net.ipv4.tcp_ecn/d' "$SYSCTL_CONF"
+    sudo sed -i '/net.ipv4.tcp_fastopen/d' "$SYSCTL_CONF"
 }
 
 # 函数：加载队列调度模块
@@ -120,6 +122,9 @@ ask_to_save() {
     echo -e "\033[36m正在应用配置...\033[0m"
     sudo sysctl -w net.core.default_qdisc="$QDISC" > /dev/null 2>&1
     sudo sysctl -w net.ipv4.tcp_congestion_control="$ALGO" > /dev/null 2>&1
+    # BBRv3 搭配优化：ECN 被动模式 + TCP 快速打开（客户端+服务端）
+    sudo sysctl -w net.ipv4.tcp_ecn=2 > /dev/null 2>&1
+    sudo sysctl -w net.ipv4.tcp_fastopen=0x203 > /dev/null 2>&1
     
     # 验证是否生效
     NEW_QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null)
@@ -143,6 +148,9 @@ ask_to_save() {
         clean_sysctl_conf
         echo "net.core.default_qdisc=$QDISC" | sudo tee -a "$SYSCTL_CONF" > /dev/null
         echo "net.ipv4.tcp_congestion_control=$ALGO" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+        # BBRv3 搭配优化
+        echo "net.ipv4.tcp_ecn=2" | sudo tee -a "$SYSCTL_CONF" > /dev/null
+        echo "net.ipv4.tcp_fastopen=515" | sudo tee -a "$SYSCTL_CONF" > /dev/null
         sudo sysctl --system > /dev/null 2>&1
         
         # 配置模块开机自动加载（fq 和 fq_codel 是内置的不需要）
