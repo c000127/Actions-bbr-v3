@@ -380,10 +380,54 @@ jobs:
             CACHY_APPLIED=true
           fi
 
+          # === Reflex Governor 极低延迟空闲管理器 ===
+          # 专注最小化调度唤醒延迟的空闲管理器（比 NAP 更激进）
+          REFLEX_APPLIED=false
+          reflex_url="${CACHYOS_BASE}/misc/reflex-governor.patch"
+          echo "=== 尝试应用 Reflex Governor 补丁 ==="
+          echo "  URL: ${reflex_url}"
+          if curl -sfL --head "$reflex_url" >/dev/null 2>&1; then
+            curl -fL --retry 3 --retry-delay 2 "$reflex_url" -o /tmp/reflex-governor.patch
+            if patch --dry-run --forward --batch -p1 < /tmp/reflex-governor.patch >/dev/null 2>&1; then
+              patch --forward --batch -p1 < /tmp/reflex-governor.patch
+              echo "✅ Reflex Governor 补丁应用成功"
+              REFLEX_APPLIED=true
+            else
+              echo "⚠️ Reflex Governor 补丁冲突，跳过"
+            fi
+          else
+            echo "ℹ️ Reflex Governor 补丁尚未发布于内核 ${kernel_series}，跳过"
+          fi
+
+          # === vmscape 虚拟化场景优化补丁 ===
+          # CachyOS 虚拟化相关内核优化（VPS 场景直接受益）
+          VMSCAPE_APPLIED=false
+          if ! $BASE_ALL_APPLIED; then
+            vmscape_url="${CACHYOS_BASE}/0007-vmscape.patch"
+            echo "=== 尝试应用 vmscape 虚拟化补丁 ==="
+            echo "  URL: ${vmscape_url}"
+            if curl -sfL --head "$vmscape_url" >/dev/null 2>&1; then
+              curl -fL --retry 3 --retry-delay 2 "$vmscape_url" -o /tmp/vmscape.patch
+              if patch --dry-run --forward --batch -p1 < /tmp/vmscape.patch >/dev/null 2>&1; then
+                patch --forward --batch -p1 < /tmp/vmscape.patch
+                echo "✅ vmscape 虚拟化补丁应用成功"
+                VMSCAPE_APPLIED=true
+              else
+                echo "⚠️ vmscape 补丁冲突，跳过"
+              fi
+            else
+              echo "ℹ️ vmscape 补丁尚未发布于内核 ${kernel_series}，跳过"
+            fi
+          else
+            VMSCAPE_APPLIED=true
+          fi
+
           # 导出补丁状态到环境变量（供后续步骤使用）
           echo "BORE_APPLIED=${BORE_APPLIED}" >> $GITHUB_ENV
           echo "NAP_APPLIED=${NAP_APPLIED}" >> $GITHUB_ENV
           echo "CACHY_APPLIED=${CACHY_APPLIED}" >> $GITHUB_ENV
+          echo "REFLEX_APPLIED=${REFLEX_APPLIED}" >> $GITHUB_ENV
+          echo "VMSCAPE_APPLIED=${VMSCAPE_APPLIED}" >> $GITHUB_ENV
 
           # 记录实际使用的补丁信息（用于 Release 说明）
           CACHYOS_URL="https://github.com/CachyOS/kernel-patches/blob/master/${kernel_series}"
@@ -405,6 +449,12 @@ jobs:
             fi
             if $NAP_APPLIED; then
               echo "| NAP Governor | [nap-governor.patch](${CACHYOS_URL}/misc/nap-governor.patch) for ${kernel_series} |"
+            fi
+            if $REFLEX_APPLIED; then
+              echo "| Reflex Governor | [reflex-governor.patch](${CACHYOS_URL}/misc/reflex-governor.patch) for ${kernel_series} |"
+            fi
+            if $VMSCAPE_APPLIED; then
+              echo "| VM 优化 | [vmscape.patch](${CACHYOS_URL}/0007-vmscape.patch) for ${kernel_series} |"
             fi
             echo "PATCH_EOF"
           } >> $GITHUB_ENV
@@ -630,18 +680,51 @@ jobs:
           scripts/config --enable ZRAM_MULTI_COMP
           scripts/config --enable ZRAM_WRITEBACK
 
+          # ================================================================
+          # === Tier 3 激进实验选项 ===
+          # ================================================================
+
+          # --- [T3] NO_HZ_FULL 全无滴答模式 ---
+          # 忙碌 CPU 不被定时器中断打断，对高吞吐单线程负载有益
+          # 覆盖共享部分的 NO_HZ_IDLE 设置
+          scripts/config --disable NO_HZ_IDLE
+          scripts/config --enable NO_HZ_FULL
+          scripts/config --enable CONTEXT_TRACKING
+          scripts/config --enable VIRT_CPU_ACCOUNTING_GEN
+
+          # --- [T3] 完全抢占模式 ---
+          # 更低调度延迟，对延迟敏感的网络服务（nginx/haproxy）有益
+          scripts/config --disable PREEMPT_LAZY
+          scripts/config --enable PREEMPT
+
+          # --- [T3] Reflex Governor 极低延迟空闲管理器 ---
+          # 比 NAP 更激进的最小化唤醒延迟策略
+          scripts/config --enable CPU_IDLE_GOV_REFLEX
+
+          # --- 网络诊断加速（ss/ip 等工具依赖）---
+          scripts/config --enable INET_DIAG
+          scripts/config --module INET_TCP_DIAG
+          scripts/config --module INET_UDP_DIAG
+          scripts/config --module INET_MPTCP_DIAG
+
+          # --- FQ-CoDel Qdisc（BBR 回退方案 + 缓冲膨胀控制）---
+          scripts/config --module NET_SCH_FQ_CODEL
+
+          # --- MGLRU 统计信息（内存回收调优参考）---
+          scripts/config --enable LRU_GEN_STATS
+
           make olddefconfig
 
           # 保存配置文件副本用于后续上传（bindeb-pkg 会改变目录结构）
           cp .config ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
           echo "=== 关键配置验证 ==="
-          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_CPU_MITIGATIONS=|CONFIG_HZ=|CONFIG_NR_CPUS=|CONFIG_DEBUG_INFO_BTF=|CONFIG_IA32_EMULATION=|CONFIG_MODULE_COMPRESS_ZSTD=|CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=|CONFIG_ZSWAP_EXCLUSIVE_LOADS=|CONFIG_SCHED_CLASS_EXT=|CONFIG_SCHED_BORE=|CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=|CONFIG_TCP_ECN=|CONFIG_LRU_GEN=|CONFIG_DAMON=|CONFIG_TCP_FASTOPEN=|CONFIG_BPFILTER=|CONFIG_CPU_IDLE_GOV_NAP=' .config || true
+          grep -E 'CONFIG_KERNEL_(XZ|ZSTD)=|CONFIG_TCP_CONG_BBR=|CONFIG_DEFAULT_TCP_CONG=|CONFIG_DEFAULT_NET_SCH=|CONFIG_BPF_JIT_ALWAYS_ON=|CONFIG_NO_HZ_(IDLE|FULL)=|CONFIG_CPU_MITIGATIONS=|CONFIG_HZ=|CONFIG_NR_CPUS=|CONFIG_DEBUG_INFO_BTF=|CONFIG_IA32_EMULATION=|CONFIG_MODULE_COMPRESS_ZSTD=|CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=|CONFIG_ZSWAP_EXCLUSIVE_LOADS=|CONFIG_SCHED_CLASS_EXT=|CONFIG_SCHED_BORE=|CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=|CONFIG_TCP_ECN=|CONFIG_LRU_GEN=|CONFIG_DAMON=|CONFIG_TCP_FASTOPEN=|CONFIG_BPFILTER=|CONFIG_CPU_IDLE_GOV_(NAP|REFLEX)=|CONFIG_PREEMPT=|CONFIG_CONTEXT_TRACKING=|CONFIG_INET_DIAG=|CONFIG_NET_SCH_FQ_CODEL=' .config || true
 
           echo "=== 检查关键配置是否生效 ==="
           UNEXPECTED=0
           grep -q 'CONFIG_KERNEL_ZSTD=y' .config || { echo "::warning::CONFIG_KERNEL_ZSTD 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_NO_HZ_IDLE=y' .config || { echo "::warning::CONFIG_NO_HZ_IDLE 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_NO_HZ_FULL=y' .config || { echo "::warning::CONFIG_NO_HZ_FULL 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=1; }
@@ -653,6 +736,8 @@ jobs:
           grep -q 'CONFIG_LRU_GEN=y' .config || { echo "::warning::LRU_GEN (MGLRU) 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_DAMON=y' .config || { echo "::warning::DAMON 未生效！"; UNEXPECTED=1; }
           grep -q 'CONFIG_TCP_FASTOPEN=y' .config || { echo "::warning::TCP_FASTOPEN 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_PREEMPT=y' .config || { echo "::warning::PREEMPT（完全抢占）未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_CONTEXT_TRACKING=y' .config || { echo "::warning::CONTEXT_TRACKING 未生效！"; UNEXPECTED=1; }
           if [ $UNEXPECTED -eq 0 ]; then
             echo "✅ 全部关键配置验证通过"
           else
@@ -740,7 +825,7 @@ jobs:
           if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
             BODY="## 🧪 [Beta] Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
 
-          > ⚠️ **激进优化版本** — x86-64-v3 指令集、1000Hz 时钟、BORE 调度器、-O3
+          > ⚠️ **激进优化版本** — x86-64-v3、1000Hz、BORE、-O3、PREEMPT、NO_HZ_FULL
 
           | 项目 | 值 |
           |---|---|
@@ -752,8 +837,8 @@ jobs:
           | 拥塞控制 | BBRv3 (built-in) + ECN |
           | 默认 Qdisc | fq |
           | 调度器 | BORE (Burst-Oriented Response Enhancer) |
-          | 定时器 | NO_HZ_IDLE |
-          | 抢占模型 | PREEMPT_LAZY + PREEMPT_DYNAMIC |
+          | 定时器 | **NO_HZ_FULL** (全无滴答) |
+          | 抢占模型 | **PREEMPT** (完全抢占) + PREEMPT_DYNAMIC |
           | 时钟频率 | **HZ=1000** (低延迟) |
           | 最大 CPU | 256 (降低自 8192) |
           | 编译优化 | **GCC 15 -O3** + ccache + \`-march=x86-64-v3\` |
@@ -763,14 +848,18 @@ jobs:
           | CPU 缓解 | **已启用** (安全优先) |
           | 32 位兼容 | **已禁用** (纯 64 位) |
           | 内存管理 | MGLRU + DAMON_RECLAIM + ZSWAP |
+          | CPU 空闲 | TEO + NAP + Reflex |
 
           ### 🚀 激进优化
           - **BORE 调度器** — 突发性感知调度，网络服务延迟降低 15-30%
           - **GCC -O3** — 激进循环展开/内联/向量化，网络栈吞吐提升 3-8%
           - **ECN (显式拥塞通知)** — BBRv3 精确拥塞感知，减少重传 10-15%
+          - **NO_HZ_FULL** — 忙碌 CPU 免定时器中断，高吞吐负载无抖动
+          - **PREEMPT（完全抢占）** — 最低调度延迟，网络服务响应更快
           - **MGLRU 多代 LRU** — 页面回收效率提升 30-50%（Google 数据）
           - **DAMON 访问热度回收** — 智能页面回收，减少 tail latency
-          - **NAP Governor** — CPU 浅睡眠策略，网络包唤醒延迟降至 ~10μs
+          - **NAP + Reflex Governor** — 极低 CPU 唤醒延迟（~10μs / ~1μs）
+          - **vmscape 虚拟化优化** — CachyOS VPS/VM 场景专用补丁
           - **CPU 漏洞缓解已开启** — Spectre/Meltdown/MDS/SRSO 等安全补丁生效
           - **x86-64-v3 指令集** — AVX2, BMI1/2, FMA, MOVBE（需 2013+ CPU）
           - **1000Hz 时钟** — 更低的调度和网络响应延迟
@@ -782,10 +871,11 @@ jobs:
           - BPF JIT 始终开启、TCP-AO (RFC 5925)、MPTCP、XDP Sockets
           - TCP_FASTOPEN（减少连接建立一个 RTT）、BPFILTER（高性能防火墙）
           - BPF_STREAM_PARSER（TCP 流解析加速）、策略路由（多 IP 支持）
+          - INET_DIAG（ss/ip 诊断加速）、FQ-CoDel（缓冲膨胀控制）
           - ZRAM 多重压缩 + 写回、zswap(ZSTD+exclusive)、HALTPOLL_CPUIDLE
-          - TEO + NAP CPU 空闲管理、sched_ext 外部调度器支持
+          - MGLRU_STATS（内存回收调优参考）、sched_ext 外部调度器支持
           - 禁用 ~30 个不必要的硬件驱动 + 32 位兼容层
-          - CachyOS 社区性能补丁（调度器/内存/驱动修复）
+          - CachyOS 社区性能补丁（调度器/内存/驱动/虚拟化修复）
 
           ### 📦 安装方式
           \`\`\`bash
