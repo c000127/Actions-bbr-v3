@@ -258,10 +258,12 @@ smart_select_branch() {
             *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
         esac
         echo ""
-        echo -e "\033[36m检测到已安装 ${BRANCH_DISPLAY} 分支内核\033[0m"
-        echo -e "\033[33m 1. 更新当前分支 (${BRANCH_DISPLAY}) 到最新版\033[0m"
-        echo -e "\033[33m 2. 切换到其他分支\033[0m"
-        echo -e "\033[33m 0. 返回主菜单\033[0m"
+        echo -e "\033[34m  ┌─\033[1;34m 📦 已安装内核\033[0m"
+        echo -e "\033[34m  └\033[0m    \033[36m当前分支：\033[0m\033[1;32m${BRANCH_DISPLAY}\033[0m"
+        echo ""
+        echo -e "\033[33m  1.\033[0m \033[36m更新当前分支 (${BRANCH_DISPLAY}) 到最新版\033[0m"
+        echo -e "\033[33m  2.\033[0m \033[36m切换到其他分支\033[0m"
+        echo -e "\033[33m  0.\033[0m \033[36m返回主菜单\033[0m"
         while true; do
             echo -n -e "\033[36m请选择 (0-2，默认 1): \033[0m"
             read -r update_choice
@@ -536,13 +538,17 @@ RUNNING_KERNEL=$(uname -r)
 while true; do
 
 clear
-print_separator
-echo -e "\033[1;35m(☆ω☆)✧*｡ 欢迎来到 BBR 管理脚本世界哒！ ✧*｡(☆ω☆)\033[0m"
-print_separator
+echo ""
+echo -e "\033[1;33m  ╔══════════════════════════════════════════════════════╗\033[0m"
+echo -e "\033[1;33m  ║    (☆ω☆) BBR v3 管理脚本 · VPS 优化版 (☆ω☆)       ║\033[0m"
+echo -e "\033[1;33m  ╚══════════════════════════════════════════════════════╝\033[0m"
+echo -e "\033[2;36m  作者：C000127  |  Fork of byJoey/Actions-bbr-v3\033[0m"
+echo ""
 # 每次循环刷新状态信息
 INSTALLED_BBR_VER=$(get_installed_version)
 CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
 CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
+echo -e "\033[34m  ┌─\033[1;34m 📊 系统状态\033[0m"
 if [[ -n "$INSTALLED_BBR_VER" ]]; then
     INSTALLED_BRANCH=$(get_installed_branch)
     case "$INSTALLED_BRANCH" in
@@ -551,28 +557,27 @@ if [[ -n "$INSTALLED_BBR_VER" ]]; then
         beta) BRANCH_LABEL="Beta（测试 - 激进优化）" ;;
         *) BRANCH_LABEL="未知分支" ;;
     esac
-    echo -e "\033[36m内核版本：\033[0m\033[1;32m${INSTALLED_BBR_VER}\033[0m"
-    echo -e "\033[36m内核分支：\033[0m\033[1;32m${BRANCH_LABEL}\033[0m"
+    echo -e "\033[34m  │\033[0m    \033[36m内核版本：\033[0m\033[1;32m${INSTALLED_BBR_VER}\033[0m"
+    echo -e "\033[34m  │\033[0m    \033[36m内核分支：\033[0m\033[1;32m${BRANCH_LABEL}\033[0m"
 else
-    echo -e "\033[36m运行内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m\033[33m（未安装优化内核）\033[0m"
+    echo -e "\033[34m  │\033[0m    \033[36m运行内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m\033[33m（未安装优化内核）\033[0m"
 fi
-echo -e "\033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
-print_separator
-echo -e "\033[1;33m作者：C000127  |  Fork of byJoey/Actions-bbr-v3"
-print_separator
-
-echo -e "\033[1;33m╭( ･ㅂ･)و ✧ 你可以选择以下操作哦：\033[0m"
-echo -e "\033[33m 1. 🚀 安装或更新 VPS 优化内核 (选择分支，安装最新版)\033[0m"
-echo -e "\033[33m 2. 📚 手动选择分支和版本安装\033[0m"
-echo -e "\033[33m 3. 🔍 查看内核与 BBR 状态\033[0m"
-echo -e "\033[33m 4. ⚡ 启用 BBR + FQ\033[0m"
-echo -e "\033[33m 5. ⚡ 启用 BBR + FQ_CODEL\033[0m"
-echo -e "\033[33m 6. ⚡ 启用 BBR + FQ_PIE\033[0m"
-echo -e "\033[33m 7. ⚡ 启用 BBR + CAKE\033[0m"
-echo -e "\033[33m 8. 🗑️  卸载优化内核\033[0m"
-print_separator
-echo -e "\033[33m 0. 🚪 退出脚本\033[0m"
-print_separator
+echo -e "\033[34m  └\033[0m    \033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
+echo ""
+echo -e "\033[32m  ┌─\033[1;32m 🚀 内核管理\033[0m"
+echo -e "\033[32m  │\033[0m    \033[33m1.\033[0m \033[36m安装或更新 VPS 优化内核\033[0m"
+echo -e "\033[32m  │\033[0m    \033[33m2.\033[0m \033[36m手动选择分支和版本安装\033[0m"
+echo -e "\033[32m  │\033[0m    \033[33m3.\033[0m \033[36m查看内核与 BBR 状态\033[0m"
+echo -e "\033[32m  └\033[0m    \033[33m8.\033[0m \033[36m卸载优化内核\033[0m"
+echo ""
+echo -e "\033[35m  ┌─\033[1;35m ⚡ 网络加速\033[0m"
+echo -e "\033[35m  │\033[0m    \033[33m4.\033[0m \033[36m启用 BBR + FQ\033[0m"
+echo -e "\033[35m  │\033[0m    \033[33m5.\033[0m \033[36m启用 BBR + FQ_CODEL\033[0m"
+echo -e "\033[35m  │\033[0m    \033[33m6.\033[0m \033[36m启用 BBR + FQ_PIE\033[0m"
+echo -e "\033[35m  └\033[0m    \033[33m7.\033[0m \033[36m启用 BBR + CAKE\033[0m"
+echo ""
+echo -e "\033[33m  0. 🚪 退出脚本\033[0m"
+echo ""
 echo -n -e "\033[36m请选择一个操作 (0-8) (｡・ω・｡): \033[0m"
 read -r ACTION
 
@@ -596,72 +601,71 @@ case "$ACTION" in
         # 内核版本信息
         INSTALLED_VER=$(get_installed_version)
         INSTALLED_BR=$(get_installed_branch)
-        echo -e "\033[34m──────────── \033[1;33m📋 内核信息 \033[0m\033[34m────────────\033[0m"
+        echo -e "\033[32m  ┌─\033[1;32m 📋 内核信息\033[0m"
         RUNNING_VER=$(uname -r)
         if [[ -z "$INSTALLED_VER" ]]; then
-            echo -e "\033[36m  运行内核：\033[0m\033[1;32m$RUNNING_VER\033[0m"
-            echo -e "\033[33m  未检测到由本脚本安装的优化内核。\033[0m"
+            echo -e "\033[32m  │\033[0m    \033[36m运行内核：\033[0m\033[1;32m$RUNNING_VER\033[0m"
+            echo -e "\033[32m  └\033[0m    \033[33m未检测到由本脚本安装的优化内核。\033[0m"
         elif [[ "$RUNNING_VER" == *"$KERNEL_BRAND"* ]]; then
             # 运行的就是已安装的优化内核
-            echo -e "\033[36m  内核：    \033[0m\033[1;32m$INSTALLED_VER\033[0m"
+            echo -e "\033[32m  │\033[0m    \033[36m内核：    \033[0m\033[1;32m$INSTALLED_VER\033[0m"
         else
             # 已安装但未重启，运行的是旧内核
-            echo -e "\033[36m  已安装：  \033[0m\033[1;32m$INSTALLED_VER\033[0m\033[33m（重启后生效）\033[0m"
-            echo -e "\033[33m  运行中：  $RUNNING_VER（旧内核）\033[0m"
+            echo -e "\033[32m  │\033[0m    \033[36m已安装：  \033[0m\033[1;32m$INSTALLED_VER\033[0m\033[33m（重启后生效）\033[0m"
+            echo -e "\033[32m  │\033[0m    \033[33m运行中：  $RUNNING_VER（旧内核）\033[0m"
         fi
         if [[ -n "$INSTALLED_VER" ]]; then
             case "$INSTALLED_BR" in
                 mainline)
-                    echo -e "\033[36m  分支：    \033[0m\033[1;32mMainline（主线）\033[0m"
-                    echo -e "\033[36m  特点：    Torvalds 主仓库 | HZ=250 | 最新特性\033[0m"
+                    echo -e "\033[32m  │\033[0m    \033[36m分支：    \033[0m\033[1;32mMainline（主线）\033[0m"
+                    echo -e "\033[32m  └\033[0m    \033[36m特点：    Torvalds 主仓库 | HZ=250 | 最新特性\033[0m"
                     ;;
                 stable)
-                    echo -e "\033[36m  分支：    \033[0m\033[1;32mStable（稳定）\033[0m"
-                    echo -e "\033[36m  特点：    Greg KH 稳定分支 | HZ=250 | Bug 修复回移\033[0m"
+                    echo -e "\033[32m  │\033[0m    \033[36m分支：    \033[0m\033[1;32mStable（稳定）\033[0m"
+                    echo -e "\033[32m  └\033[0m    \033[36m特点：    Greg KH 稳定分支 | HZ=250 | Bug 修复回移\033[0m"
                     ;;
                 beta)
-                    echo -e "\033[36m  分支：    \033[0m\033[1;31mBeta（测试 - 激进优化）\033[0m"
-                    echo -e "\033[36m  特点：    x86-64-v3 | HZ=1000 | 纯 64 位\033[0m"
-                    echo -e "\033[36m            NR_CPUS=256 | RCU Lazy\033[0m"
+                    echo -e "\033[32m  │\033[0m    \033[36m分支：    \033[0m\033[1;31mBeta（测试 - 激进优化）\033[0m"
+                    echo -e "\033[32m  │\033[0m    \033[36m特点：    x86-64-v3 | HZ=1000 | 纯 64 位\033[0m"
+                    echo -e "\033[32m  └\033[0m    \033[36m            NR_CPUS=256 | RCU Lazy\033[0m"
                     ;;
                 *)
-                    echo -e "\033[36m  分支：    \033[0m\033[33m未知\033[0m"
+                    echo -e "\033[32m  └\033[0m    \033[36m分支：    \033[0m\033[33m未知\033[0m"
                     ;;
             esac
         fi
         echo ""
         # BBR 状态检查
-        echo -e "\033[34m──────────── \033[1;33m🔍 BBR 状态 \033[0m\033[34m────────────\033[0m"
+        echo -e "\033[34m  ┌─\033[1;34m 🔍 BBR 状态\033[0m"
         BBR_MODULE_INFO=$(modinfo tcp_bbr 2>/dev/null)
         if [[ -z "$BBR_MODULE_INFO" ]]; then
-            echo -e "\033[36m  正在刷新模块依赖...\033[0m"
+            echo -e "\033[34m  │\033[0m    \033[36m正在刷新模块依赖...\033[0m"
             sudo depmod -a
             BBR_MODULE_INFO=$(modinfo tcp_bbr 2>/dev/null)
         fi
         if [[ -z "$BBR_MODULE_INFO" ]]; then
-            echo -e "\033[31m  ⚠ 未加载 tcp_bbr 模块，请先安装内核并重启\033[0m"
+            echo -e "\033[34m  └\033[0m    \033[31m⚠ 未加载 tcp_bbr 模块，请先安装内核并重启\033[0m"
         else
             BBR_VERSION=$(echo "$BBR_MODULE_INFO" | awk '/^version:/ {print $2}')
             CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
             CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
 
             if [[ "$BBR_VERSION" == "3" ]]; then
-                echo -e "\033[36m  BBR 版本：\033[0m\033[1;32m$BBR_VERSION (v3) ✔\033[0m"
+                echo -e "\033[34m  │\033[0m    \033[36mBBR 版本：\033[0m\033[1;32m$BBR_VERSION (v3) ✔\033[0m"
             else
-                echo -e "\033[33m  BBR 版本：$BBR_VERSION（非 v3）⚠\033[0m"
+                echo -e "\033[34m  │\033[0m    \033[33mBBR 版本：$BBR_VERSION（非 v3）⚠\033[0m"
             fi
             if [[ "$CURRENT_ALGO" == "bbr" ]]; then
-                echo -e "\033[36m  拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO ✔\033[0m"
+                echo -e "\033[34m  │\033[0m    \033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO ✔\033[0m"
             else
-                echo -e "\033[33m  拥塞控制：$CURRENT_ALGO（非 bbr）⚠\033[0m"
+                echo -e "\033[34m  │\033[0m    \033[33m拥塞控制：$CURRENT_ALGO（非 bbr）⚠\033[0m"
             fi
-            echo -e "\033[36m  队列算法：\033[0m\033[1;32m$CURRENT_QDISC ✔\033[0m"
+            echo -e "\033[34m  │\033[0m    \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC ✔\033[0m"
 
-            echo -e "\033[34m─────────────────────────────────────\033[0m"
             if [[ "$BBR_VERSION" == "3" && "$CURRENT_ALGO" == "bbr" ]]; then
-                echo -e "\033[1;32m  ヽ(✿ﾟ▽ﾟ)ノ BBR v3 已正确安装并生效！\033[0m"
+                echo -e "\033[34m  └\033[0m    \033[1;32mヽ(✿ﾟ▽ﾟ)ノ BBR v3 已正确安装并生效！\033[0m"
             else
-                echo -e "\033[33m  BBR v3 未完全生效，请安装内核并重启后使用选项 4-7 启用\033[0m"
+                echo -e "\033[34m  └\033[0m    \033[33mBBR v3 未完全生效，请安装内核并重启后使用选项 4-7 启用\033[0m"
             fi
         fi
         ;;
