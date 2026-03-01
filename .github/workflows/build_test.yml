@@ -209,8 +209,13 @@ jobs:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
         run: |
           # 配置在缓存恢复之后执行，确保设置不被旧缓存覆盖
-          # 单次内核编译约 1.4~2.0 GiB，5G 留出余量同时自动淘汰旧条目
-          ccache --max-size=5G
+          # ⚠️ 一次性清理：旧缓存使用 depend_mode=false（默认值），
+          # 与新配置 depend_mode=true 不兼容（ccache 文档明确说明两种模式的缓存条目互不通用）
+          # 清空后首次构建无命中，但后续构建将恢复 70-90% 命中率
+          # TODO: 下次构建命中率恢复后，删除此行
+          ccache -C 2>/dev/null || true
+          # 单次 depend_mode 编译约 1.5~1.8 GiB，3G 足够容纳一次完整构建加增量余量
+          ccache --max-size=3G
           # 按文件内容校验编译器（避免路径变化导致缓存失效）
           ccache --set-config=compiler_check=content
           # 启用压缩，节省缓存空间（level 6 压缩率/速度平衡）
@@ -666,4 +671,19 @@ jobs:
               -d "$(jq -n --arg body "$BODY" '{body: $body}')"
             echo "已更新 Release 说明"
           fi
+
+      - name: 🧹 清理旧 ccache 缓存条目
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 删除当前 arch+series+branch 的所有旧缓存条目
+          # actions/cache 的 post-action 会在 job 结束时保存新条目
+          # 避免旧条目堆积超出 GitHub Actions 10 GB 总缓存限额
+          PREFIX="beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-"
+          echo "清理缓存前缀: ${PREFIX}"
+          gh cache list --key "${PREFIX}" --json key -q '.[].key' | while read key; do
+            echo "删除旧缓存: ${key}"
+            gh cache delete "${key}" || true
+          done
 
