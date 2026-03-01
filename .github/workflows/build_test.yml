@@ -186,17 +186,34 @@ jobs:
             echo "⚠️ ${FAIL_COUNT} 个工具升级失败（已回退到 apt/系统版本）"
           fi
 
-      - name: 🚀 配置 ccache 编译加速
+      - name: 🚀 准备 ccache 环境
         run: |
           echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
           echo "/usr/lib/ccache" >> $GITHUB_PATH
           mkdir -p ${{ github.workspace }}/.ccache
-          # build_test 使用激进编译选项（x86-64-v3、mitigations off），
-          # 缓存容量适当增大以容纳不同配置的编译产物
-          ccache --max-size=8G
+
+      - name: 📦 恢复 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          # beta- 前缀隔离 build_test 与 build.yml 的缓存
+          # 两者编译选项不同（x86-64-v3 等），不能共享
+          key: beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
+          restore-keys: |
+            beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
+            beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
+            beta-ccache-${{ matrix.arch }}-
+
+      - name: 🔧 配置 ccache 编译加速
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          # 配置在缓存恢复之后执行，确保设置不被旧缓存覆盖
+          # 单次内核编译约 1.4~2.0 GiB，5G 留出余量同时自动淘汰旧条目
+          ccache --max-size=5G
           # 按文件内容校验编译器（避免路径变化导致缓存失效）
           ccache --set-config=compiler_check=content
-          # 启用压缩，节省缓存空间（level 1 几乎不影响速度）
+          # 启用压缩，节省缓存空间（level 6 压缩率/速度平衡）
           ccache --set-config=compression=true
           ccache --set-config=compression_level=6
           # depend 模式：跳过预处理阶段直接使用依赖信息，大幅提升缓存命中
@@ -208,20 +225,10 @@ jobs:
           ccache --set-config=direct_mode=true
           # 忽略 header 时间戳变化（GitHub Actions 每次 clone 时间戳都不同）
           ccache --set-config=inode_cache=true
+          # 清除旧统计，确保本次构建的命中率数据准确
+          ccache -z
           echo "ccache 配置完成:"
           ccache -p | grep -E 'max_size|compression|depend_mode|sloppiness|direct_mode'
-
-      - name: 📦 恢复 ccache 缓存
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.ccache
-          # beta- 前缀隔离 build_test 与 build.yml 的缓存
-          # 两者编译选项不同（x86-64-v3、mitigations off 等），不能共享
-          key: beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
-          restore-keys: |
-            beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
-            beta-ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-
-            beta-ccache-${{ matrix.arch }}-
 
       - name: ⬇️ 下载内核源代码
         run: |
@@ -537,6 +544,8 @@ jobs:
           echo "编译耗时: $(( (BUILD_END - BUILD_START) / 60 )) 分 $(( (BUILD_END - BUILD_START) % 60 )) 秒"
           echo "ccache 命中统计:"
           ccache -s || true
+          # 清理过期缓存条目，保持缓存精简（减少 Actions cache 体积）
+          ccache -c || true
 
           # 清理不需要上传的包：
           #   -dbg: 调试符号包，启用 BTF 后超过 2GB，超出 GitHub release 上限
