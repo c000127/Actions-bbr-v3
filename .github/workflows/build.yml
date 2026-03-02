@@ -202,9 +202,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          # 每次构建使用唯一 key（附加 run_id），确保更新后的缓存能被保存
+          # 每次构建使用唯一 key（run_id + run_attempt），确保重跑也能保存新缓存
           # 恢复时按 arch+series+branch 前缀匹配最近一次缓存
-          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}
+          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
 
@@ -654,12 +654,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 删除当前 arch+series+branch 的所有旧缓存条目
+          # 删除当前 arch+series+branch 的所有旧缓存条目（排除本次即将保存的 key）
           # actions/cache 的 post-action 会在 job 结束时保存新条目
           # 避免旧条目堆积超出 GitHub Actions 10 GB 总缓存限额
           PREFIX="ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-"
-          echo "清理缓存前缀: ${PREFIX}"
+          CURRENT_KEY="ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "清理缓存前缀: ${PREFIX}（保留: ${CURRENT_KEY}）"
           gh cache list --key "${PREFIX}" --json key -q '.[].key' | while read key; do
+            if [ "${key}" = "${CURRENT_KEY}" ]; then
+              echo "跳过当前缓存: ${key}"
+              continue
+            fi
             echo "删除旧缓存: ${key}"
             gh cache delete "${key}" || true
           done
