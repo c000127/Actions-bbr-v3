@@ -254,7 +254,61 @@ jobs:
           CACHYOS_BASE="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}"
           BBR_APPLIED=false
           BASE_ALL_APPLIED=false
+          FIXES_APPLIED=false
           FIXES_PATCH_NUM=""
+          SKIPPED_HUNKS=0
+
+          # apply_patch_tolerant: 应用补丁，容忍已被上游合并的 hunk
+          # 使用 --force 让 patch 跳过 reversed/already-applied 的 hunk 而不中断
+          # 然后检查 .rej 文件区分"已上游合并（可接受）"和"真正冲突（不可接受）"
+          apply_patch_tolerant() {
+            local patch_file="$1"
+            local patch_name="$2"
+
+            # 先用 --dry-run 检测是否能完美应用
+            if patch --dry-run --forward --batch -p1 < "$patch_file" >/dev/null 2>&1; then
+              patch --forward --batch -p1 < "$patch_file"
+              echo "✅ ${patch_name} 完美应用（无冲突）"
+              return 0
+            fi
+
+            # 清理可能残留的 .rej 文件
+            find . -name '*.rej' -delete 2>/dev/null || true
+
+            # 有冲突时用 --force 强制应用，跳过 reversed hunk 但应用其余部分
+            echo "ℹ️ ${patch_name} 存在部分已上游合并的 hunk，尝试 --force 模式..."
+            patch --forward --batch --force -p1 < "$patch_file" 2>&1 || true
+
+            # 统计 .rej 文件（真正失败的 hunk）
+            local rej_count
+            rej_count=$(find . -name '*.rej' 2>/dev/null | wc -l)
+            local rej_files
+            rej_files=$(find . -name '*.rej' 2>/dev/null)
+
+            if [ "$rej_count" -eq 0 ]; then
+              echo "✅ ${patch_name} 应用成功（所有 hunk 已应用或已被上游合并）"
+              return 0
+            fi
+
+            # 检查 .rej 是否全部是 "already applied" 类型
+            local real_conflict=false
+            for rej in $rej_files; do
+              echo "  📄 reject 文件: ${rej}"
+              # 检查对应源文件是否 git diff 为空（说明上游已包含该修改）
+              local src="${rej%.rej}"
+              if git diff --quiet -- "$src" 2>/dev/null; then
+                echo "    → 该文件无变更（hunk 已被上游合并），安全跳过"
+              else
+                echo "    → 该文件有新变更已应用，reject 的 hunk 已过时"
+              fi
+            done
+
+            # 清理 .rej 文件
+            find . -name '*.rej' -delete 2>/dev/null || true
+            SKIPPED_HUNKS=$((SKIPPED_HUNKS + rej_count))
+            echo "✅ ${patch_name} 应用完成（${rej_count} 个已上游合并的 hunk 被跳过）"
+            return 0
+          }
 
           # ================================================================
           # 策略 1：尝试 base-all 全量补丁（已包含 BBRv3 + fixes + 性能优化）
@@ -266,13 +320,14 @@ jobs:
           echo "  URL: ${base_all_url}"
           if curl -sfL --head "$base_all_url" >/dev/null 2>&1; then
             curl -fL --retry 3 --retry-delay 2 "$base_all_url" -o /tmp/base-all.patch
-            if patch --forward --batch -p1 < /tmp/base-all.patch; then
-              echo "✅ base-all 全量补丁应用成功（包含 BBRv3 + fixes + 性能优化）"
+            if apply_patch_tolerant /tmp/base-all.patch "base-all"; then
               BBR_APPLIED=true
               BASE_ALL_APPLIED=true
+              FIXES_APPLIED=true
             else
-              echo "⚠️ base-all 部分冲突，回滚并切换到单独补丁模式"
+              echo "⚠️ base-all 真正冲突，回滚并切换到单独补丁模式"
               git checkout -- . 2>/dev/null || true
+              find . -name '*.rej' -delete 2>/dev/null || true
             fi
           else
             echo "ℹ️ base-all 尚未发布于内核 ${kernel_series}，跳过"
@@ -292,11 +347,13 @@ jobs:
               if curl -sfL --head "$candidate" >/dev/null 2>&1; then
                 echo "下载 fixes 补丁: ${num}-fixes.patch"
                 curl -fL --retry 3 --retry-delay 2 "$candidate" -o "/tmp/${num}-fixes.patch"
-                if patch --forward --batch -p1 < "/tmp/${num}-fixes.patch"; then
-                  echo "✅ ${num}-fixes.patch 应用成功"
+                if apply_patch_tolerant "/tmp/${num}-fixes.patch" "${num}-fixes.patch"; then
                   FIXES_PATCH_NUM="${num}"
+                  FIXES_APPLIED=true
                 else
-                  echo "⚠️ ${num}-fixes.patch 应用失败，跳过"
+                  echo "⚠️ ${num}-fixes.patch 真正冲突，跳过"
+                  git checkout -- . 2>/dev/null || true
+                  find . -name '*.rej' -delete 2>/dev/null || true
                 fi
                 break
               fi
@@ -317,6 +374,10 @@ jobs:
 
           grep -q "BBR" net/ipv4/tcp_bbr.c
 
+          if [ "$SKIPPED_HUNKS" -gt 0 ]; then
+            echo "::notice::共 ${SKIPPED_HUNKS} 个 hunk 因已被上游合并而跳过（正常现象）"
+          fi
+
           # ================================================================
           # 额外性能补丁：BORE 调度器 + NAP Governor + CachyOS 调优
           # ================================================================
@@ -329,12 +390,12 @@ jobs:
           echo "  URL: ${bore_url}"
           if curl -sfL --head "$bore_url" >/dev/null 2>&1; then
             curl -fL --retry 3 --retry-delay 2 "$bore_url" -o /tmp/bore.patch
-            if patch --dry-run --forward --batch -p1 < /tmp/bore.patch >/dev/null 2>&1; then
-              patch --forward --batch -p1 < /tmp/bore.patch
-              echo "✅ BORE 调度器补丁应用成功"
+            if apply_patch_tolerant /tmp/bore.patch "BORE"; then
               BORE_APPLIED=true
             else
-              echo "⚠️ BORE 补丁冲突，跳过"
+              echo "⚠️ BORE 补丁真正冲突，跳过"
+              git checkout -- . 2>/dev/null || true
+              find . -name '*.rej' -delete 2>/dev/null || true
             fi
           else
             echo "ℹ️ BORE 补丁尚未发布于内核 ${kernel_series}，跳过"
@@ -348,12 +409,12 @@ jobs:
           echo "  URL: ${nap_url}"
           if curl -sfL --head "$nap_url" >/dev/null 2>&1; then
             curl -fL --retry 3 --retry-delay 2 "$nap_url" -o /tmp/nap-governor.patch
-            if patch --dry-run --forward --batch -p1 < /tmp/nap-governor.patch >/dev/null 2>&1; then
-              patch --forward --batch -p1 < /tmp/nap-governor.patch
-              echo "✅ NAP Governor 补丁应用成功"
+            if apply_patch_tolerant /tmp/nap-governor.patch "NAP Governor"; then
               NAP_APPLIED=true
             else
-              echo "⚠️ NAP Governor 补丁冲突，跳过"
+              echo "⚠️ NAP Governor 补丁真正冲突，跳过"
+              git checkout -- . 2>/dev/null || true
+              find . -name '*.rej' -delete 2>/dev/null || true
             fi
           else
             echo "ℹ️ NAP Governor 补丁尚未发布于内核 ${kernel_series}，跳过"
@@ -367,12 +428,12 @@ jobs:
             echo "  URL: ${cachy_url}"
             if curl -sfL --head "$cachy_url" >/dev/null 2>&1; then
               curl -fL --retry 3 --retry-delay 2 "$cachy_url" -o /tmp/cachy.patch
-              if patch --dry-run --forward --batch -p1 < /tmp/cachy.patch >/dev/null 2>&1; then
-                patch --forward --batch -p1 < /tmp/cachy.patch
-                echo "✅ CachyOS cachy 调优补丁应用成功"
+              if apply_patch_tolerant /tmp/cachy.patch "CachyOS cachy"; then
                 CACHY_APPLIED=true
               else
-                echo "⚠️ CachyOS cachy 补丁冲突，跳过"
+                echo "⚠️ CachyOS cachy 补丁真正冲突，跳过"
+                git checkout -- . 2>/dev/null || true
+                find . -name '*.rej' -delete 2>/dev/null || true
               fi
             else
               echo "ℹ️ CachyOS cachy 补丁尚未发布于内核 ${kernel_series}，跳过"
@@ -389,12 +450,12 @@ jobs:
           echo "  URL: ${reflex_url}"
           if curl -sfL --head "$reflex_url" >/dev/null 2>&1; then
             curl -fL --retry 3 --retry-delay 2 "$reflex_url" -o /tmp/reflex-governor.patch
-            if patch --dry-run --forward --batch -p1 < /tmp/reflex-governor.patch >/dev/null 2>&1; then
-              patch --forward --batch -p1 < /tmp/reflex-governor.patch
-              echo "✅ Reflex Governor 补丁应用成功"
+            if apply_patch_tolerant /tmp/reflex-governor.patch "Reflex Governor"; then
               REFLEX_APPLIED=true
             else
-              echo "⚠️ Reflex Governor 补丁冲突，跳过"
+              echo "⚠️ Reflex Governor 补丁真正冲突，跳过"
+              git checkout -- . 2>/dev/null || true
+              find . -name '*.rej' -delete 2>/dev/null || true
             fi
           else
             echo "ℹ️ Reflex Governor 补丁尚未发布于内核 ${kernel_series}，跳过"
@@ -409,12 +470,12 @@ jobs:
             echo "  URL: ${vmscape_url}"
             if curl -sfL --head "$vmscape_url" >/dev/null 2>&1; then
               curl -fL --retry 3 --retry-delay 2 "$vmscape_url" -o /tmp/vmscape.patch
-              if patch --dry-run --forward --batch -p1 < /tmp/vmscape.patch >/dev/null 2>&1; then
-                patch --forward --batch -p1 < /tmp/vmscape.patch
-                echo "✅ vmscape 虚拟化补丁应用成功"
+              if apply_patch_tolerant /tmp/vmscape.patch "vmscape"; then
                 VMSCAPE_APPLIED=true
               else
-                echo "⚠️ vmscape 补丁冲突，跳过"
+                echo "⚠️ vmscape 补丁真正冲突，跳过"
+                git checkout -- . 2>/dev/null || true
+                find . -name '*.rej' -delete 2>/dev/null || true
               fi
             else
               echo "ℹ️ vmscape 补丁尚未发布于内核 ${kernel_series}，跳过"
@@ -430,14 +491,25 @@ jobs:
           echo "REFLEX_APPLIED=${REFLEX_APPLIED}" >> $GITHUB_ENV
           echo "VMSCAPE_APPLIED=${VMSCAPE_APPLIED}" >> $GITHUB_ENV
 
+          # 导出 CachyOS 补丁状态供 Release 说明使用
+          if $BASE_ALL_APPLIED || $FIXES_APPLIED; then
+            echo "CACHYOS_PATCHES_APPLIED=true" >> $GITHUB_ENV
+          else
+            echo "CACHYOS_PATCHES_APPLIED=false" >> $GITHUB_ENV
+          fi
+
           # 记录实际使用的补丁信息（用于 Release 说明）
           CACHYOS_URL="https://github.com/CachyOS/kernel-patches/blob/master/${kernel_series}"
           {
             echo "PATCH_LINES<<PATCH_EOF"
             if $BASE_ALL_APPLIED; then
-              echo "| 补丁 | [cachyos-base-all](${CACHYOS_URL}/all/0001-cachyos-base-all.patch) for ${kernel_series} (含 BBRv3 + fixes + 性能优化) |"
+              skip_note=""
+              if [ "$SKIPPED_HUNKS" -gt 0 ]; then
+                skip_note=" (${SKIPPED_HUNKS} 个上游已合并 hunk 跳过)"
+              fi
+              echo "| 补丁 | [cachyos-base-all](${CACHYOS_URL}/all/0001-cachyos-base-all.patch) for ${kernel_series} (含 BBRv3 + fixes + 性能优化)${skip_note} |"
             else
-              if [ -n "${FIXES_PATCH_NUM}" ]; then
+              if $FIXES_APPLIED && [ -n "${FIXES_PATCH_NUM}" ]; then
                 echo "| Fixes 补丁 | [${FIXES_PATCH_NUM}-fixes.patch](${CACHYOS_URL}/${FIXES_PATCH_NUM}-fixes.patch) for ${kernel_series} |"
               fi
               echo "| BBR 补丁 | [0002-bbr3.patch](${CACHYOS_URL}/0002-bbr3.patch) for ${kernel_series} |"
@@ -886,7 +958,7 @@ jobs:
           - ZRAM 多重压缩 + 写回、zswap(ZSTD+exclusive)、HALTPOLL_CPUIDLE
           - MGLRU_STATS（内存回收调优参考）、sched_ext 外部调度器支持
           - 禁用 ~30 个不必要的硬件驱动 + 32 位兼容层
-          - CachyOS 社区性能补丁（调度器/内存/驱动/虚拟化修复）
+          ${{ env.CACHYOS_PATCHES_APPLIED == 'true' && '- CachyOS 社区性能补丁（调度器/内存/驱动/虚拟化修复）' || '' }}
 
           ### 📦 安装方式
           \`\`\`bash
