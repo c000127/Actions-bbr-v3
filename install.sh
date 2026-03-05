@@ -32,19 +32,49 @@ fi
 
 # 检查并安装必要的依赖（仅检查 Debian 非必备包）
 # dpkg, awk, sed, sysctl 属于 Debian 必备包（dpkg, mawk, sed, procps），无需检查
+#
+# 命令 → 包名映射（通过 command -v 检测）
 declare -A CMD_PKG_MAP=(
     ["curl"]="curl"
     ["wget"]="wget"
     ["jq"]="jq"
 )
+# 必需包列表（通过 dpkg -s 检测，无对应命令或命令名与包名不同）
+#   ca-certificates    — HTTPS 证书，缺失则 curl/wget 无法下载
+#   initramfs-tools    — 内核安装后生成 initrd，缺失则无法启动新内核
+REQUIRED_PKGS=("ca-certificates" "initramfs-tools")
+
 apt_updated=false
+install_failed=false
+
+# 1) 检查命令类依赖
 for cmd in "${!CMD_PKG_MAP[@]}"; do
     if ! command -v "$cmd" &> /dev/null; then
         echo -e "\033[33m缺少依赖：$cmd，正在安装 ${CMD_PKG_MAP[$cmd]}...\033[0m"
         if ! $apt_updated; then sudo apt-get update > /dev/null 2>&1; apt_updated=true; fi
-        sudo apt-get install -y "${CMD_PKG_MAP[$cmd]}" > /dev/null 2>&1
+        if ! sudo apt-get install -y "${CMD_PKG_MAP[$cmd]}" > /dev/null 2>&1; then
+            echo -e "\033[31m安装 ${CMD_PKG_MAP[$cmd]} 失败！\033[0m"
+            install_failed=true
+        fi
     fi
 done
+
+# 2) 检查包类依赖
+for pkg in "${REQUIRED_PKGS[@]}"; do
+    if ! dpkg -s "$pkg" &> /dev/null 2>&1; then
+        echo -e "\033[33m缺少依赖包：$pkg，正在安装...\033[0m"
+        if ! $apt_updated; then sudo apt-get update > /dev/null 2>&1; apt_updated=true; fi
+        if ! sudo apt-get install -y "$pkg" > /dev/null 2>&1; then
+            echo -e "\033[31m安装 $pkg 失败！\033[0m"
+            install_failed=true
+        fi
+    fi
+done
+
+if $install_failed; then
+    echo -e "\033[31m部分依赖安装失败，脚本可能无法正常工作。请检查 apt 源配置后重试。\033[0m"
+    exit 1
+fi
 
 # 检测系统架构
 ARCH=$(uname -m)
