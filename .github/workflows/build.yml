@@ -55,13 +55,58 @@ jobs:
         id: get_kernel_version
         run: |
           echo "选择的内核分支: ${{ matrix.branch }}"
-          version=$(curl -sL --retry 3 https://www.kernel.org \
+
+          # 从 kernel.org 获取版本
+          korg_version=$(curl -sL --retry 3 https://www.kernel.org \
             | grep -A1 -m1 "${{ matrix.branch }}:" \
-            | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?')
-          if [[ -z "$version" ]]; then
-            echo "::error::无法从 kernel.org 获取内核版本号"
-            exit 1
+            | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?') || true
+
+          if [[ "${{ matrix.branch }}" == "mainline" ]]; then
+            # mainline 额外检查 torvalds/linux 仓库最新 tag
+            # GitHub tag 更新通常比 kernel.org 更快（如 kernel.org 显示 rc2 时 GitHub 已有 rc3）
+            echo "检查 torvalds/linux 仓库最新 tag..."
+            # versionsort.suffix=-rc 让 git 将 -rc 视为预发布后缀
+            # 排序结果：v7.0 > v7.0-rc3 > v7.0-rc2 > v6.15 > ...
+            gh_version=$(git -c 'versionsort.suffix=-rc' ls-remote \
+              --tags --refs --sort=-version:refname \
+              https://github.com/torvalds/linux.git 'v[0-9]*' \
+              | head -5 | awk '{print $2}' | sed 's|refs/tags/v||' \
+              | grep -P '^\d+\.\d+(-rc\d+)?$' \
+              | head -1) || true
+
+            echo "kernel.org 版本: ${korg_version:-无}"
+            echo "torvalds/linux 最新 tag: ${gh_version:-无}"
+
+            if [[ -n "$korg_version" && -n "$gh_version" ]]; then
+              # 使用 dpkg 版本比较（~ 在 Debian 规则中排序最低）
+              # 7.0~rc2 < 7.0~rc3 < 7.0，完美匹配内核版本语义
+              korg_deb=$(echo "$korg_version" | sed 's/-rc/~rc/')
+              gh_deb=$(echo "$gh_version" | sed 's/-rc/~rc/')
+              if dpkg --compare-versions "$gh_deb" gt "$korg_deb"; then
+                echo "✅ torvalds/linux 版本更新，使用 $gh_version（kernel.org: $korg_version）"
+                version="$gh_version"
+              else
+                echo "ℹ️ kernel.org 版本相同或更新，使用 $korg_version"
+                version="$korg_version"
+              fi
+            elif [[ -n "$gh_version" ]]; then
+              echo "⚠️ kernel.org 获取失败，使用 torvalds/linux tag: $gh_version"
+              version="$gh_version"
+            elif [[ -n "$korg_version" ]]; then
+              version="$korg_version"
+            else
+              echo "::error::无法从 kernel.org 和 torvalds/linux 获取内核版本号"
+              exit 1
+            fi
+          else
+            # stable 分支只从 kernel.org 获取
+            version="$korg_version"
+            if [[ -z "$version" ]]; then
+              echo "::error::无法从 kernel.org 获取内核版本号"
+              exit 1
+            fi
           fi
+
           echo "获取到内核版本: $version"
           echo "KERNEL_VERSION=$version" >> $GITHUB_ENV
           # 提取主版本号（用于 ccache key 和补丁查找）
