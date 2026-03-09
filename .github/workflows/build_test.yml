@@ -429,9 +429,17 @@ jobs:
 
           # === BORE (Burst-Oriented Response Enhancer) 调度器 ===
           # 基于 EEVDF 的增强调度器，降低交互式任务延迟 15-30%
+          # bore-cachy：适用于已应用 base-all（含 CONFIG_CACHY）的源码
+          # bore：适用于原版内核源码（无 CONFIG_CACHY）
           BORE_APPLIED=false
-          bore_url="${CACHYOS_BASE}/sched/0001-bore-cachy.patch"
-          echo "=== 尝试应用 BORE 调度器补丁 ==="
+          if $BASE_ALL_APPLIED; then
+            bore_url="${CACHYOS_BASE}/sched/0001-bore-cachy.patch"
+            bore_patch_name="bore-cachy"
+          else
+            bore_url="${CACHYOS_BASE}/sched/0001-bore.patch"
+            bore_patch_name="bore"
+          fi
+          echo "=== 尝试应用 BORE 调度器补丁（${bore_patch_name}）==="
           echo "  URL: ${bore_url}"
           if curl -sfL --head "$bore_url" >/dev/null 2>&1; then
             curl -fL --retry 3 --retry-delay 2 "$bore_url" -o /tmp/bore.patch
@@ -531,6 +539,7 @@ jobs:
 
           # 导出补丁状态到环境变量（供后续步骤使用）
           echo "BORE_APPLIED=${BORE_APPLIED}" >> $GITHUB_ENV
+          echo "BORE_PATCH_NAME=${bore_patch_name:-bore}" >> $GITHUB_ENV
           echo "NAP_APPLIED=${NAP_APPLIED}" >> $GITHUB_ENV
           echo "CACHY_APPLIED=${CACHY_APPLIED}" >> $GITHUB_ENV
           echo "REFLEX_APPLIED=${REFLEX_APPLIED}" >> $GITHUB_ENV
@@ -563,7 +572,7 @@ jobs:
               fi
             fi
             if $BORE_APPLIED; then
-              echo "| BORE 调度器 | [bore-cachy.patch](${CACHYOS_URL}/sched/0001-bore-cachy.patch) for ${kernel_series} |"
+              echo "| BORE 调度器 | [${BORE_PATCH_NAME}.patch](${CACHYOS_URL}/sched/0001-${BORE_PATCH_NAME}.patch) for ${kernel_series} |"
             fi
             if $NAP_APPLIED; then
               echo "| NAP Governor | [nap-governor.patch](${CACHYOS_URL}/misc/nap-governor.patch) for ${kernel_series} |"
