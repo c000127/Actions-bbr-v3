@@ -572,7 +572,7 @@ jobs:
               fi
             fi
             if $BORE_APPLIED; then
-              echo "| BORE 调度器 | [${BORE_PATCH_NAME}.patch](${CACHYOS_URL}/sched/0001-${BORE_PATCH_NAME}.patch) for ${kernel_series} |"
+              echo "| BORE 调度器 | [${bore_patch_name}.patch](${CACHYOS_URL}/sched/0001-${bore_patch_name}.patch) for ${kernel_series} |"
             fi
             if $NAP_APPLIED; then
               echo "| NAP Governor | [nap-governor.patch](${CACHYOS_URL}/misc/nap-governor.patch) for ${kernel_series} |"
