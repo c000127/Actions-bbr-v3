@@ -443,10 +443,14 @@ jobs:
           echo "  URL: ${bore_url}"
           if curl -sfL --head "$bore_url" >/dev/null 2>&1; then
             curl -fL --retry 3 --retry-delay 2 "$bore_url" -o /tmp/bore.patch
-            if apply_patch_tolerant /tmp/bore.patch "BORE"; then
+            # BORE 包含新代码定义（如 nsecs_per_tick），不能用 apply_patch_tolerant
+            # 必须完美应用或完全回滚，否则会因缺少定义导致编译失败
+            if patch --dry-run --forward --batch -p1 < /tmp/bore.patch >/dev/null 2>&1; then
+              patch --forward --batch -p1 < /tmp/bore.patch
+              echo "✅ BORE 完美应用（无冲突）"
               BORE_APPLIED=true
             else
-              echo "⚠️ BORE 补丁真正冲突，跳过"
+              echo "⚠️ BORE 补丁与当前内核不兼容，跳过（避免部分应用导致编译失败）"
               git checkout -- . 2>/dev/null || true
               find . -name '*.rej' -delete 2>/dev/null || true
             fi
@@ -462,10 +466,13 @@ jobs:
           echo "  URL: ${nap_url}"
           if curl -sfL --head "$nap_url" >/dev/null 2>&1; then
             curl -fL --retry 3 --retry-delay 2 "$nap_url" -o /tmp/nap-governor.patch
-            if apply_patch_tolerant /tmp/nap-governor.patch "NAP Governor"; then
+            # NAP 引入新 governor 代码，不能部分应用
+            if patch --dry-run --forward --batch -p1 < /tmp/nap-governor.patch >/dev/null 2>&1; then
+              patch --forward --batch -p1 < /tmp/nap-governor.patch
+              echo "✅ NAP Governor 完美应用（无冲突）"
               NAP_APPLIED=true
             else
-              echo "⚠️ NAP Governor 补丁真正冲突，跳过"
+              echo "⚠️ NAP Governor 补丁与当前内核不兼容，跳过"
               git checkout -- . 2>/dev/null || true
               find . -name '*.rej' -delete 2>/dev/null || true
             fi
@@ -503,10 +510,13 @@ jobs:
           echo "  URL: ${reflex_url}"
           if curl -sfL --head "$reflex_url" >/dev/null 2>&1; then
             curl -fL --retry 3 --retry-delay 2 "$reflex_url" -o /tmp/reflex-governor.patch
-            if apply_patch_tolerant /tmp/reflex-governor.patch "Reflex Governor"; then
+            # Reflex 引入新 governor 代码，不能部分应用
+            if patch --dry-run --forward --batch -p1 < /tmp/reflex-governor.patch >/dev/null 2>&1; then
+              patch --forward --batch -p1 < /tmp/reflex-governor.patch
+              echo "✅ Reflex Governor 完美应用（无冲突）"
               REFLEX_APPLIED=true
             else
-              echo "⚠️ Reflex Governor 补丁真正冲突，跳过"
+              echo "⚠️ Reflex Governor 补丁与当前内核不兼容，跳过"
               git checkout -- . 2>/dev/null || true
               find . -name '*.rej' -delete 2>/dev/null || true
             fi
@@ -758,7 +768,10 @@ jobs:
 
           # --- BORE 调度器（Burst-Oriented Response Enhancer）---
           # 优化 EEVDF 调度器，交互式任务自动获得更低延迟
-          scripts/config --enable SCHED_BORE
+          # 仅在 BORE 补丁成功应用时启用（补丁失败时源码中不存在该选项）
+          if [[ "${{ env.BORE_APPLIED }}" == "true" ]]; then
+            scripts/config --enable SCHED_BORE
+          fi
 
           # --- GCC -O3 优化（CachyOS 默认，大规模验证）---
           # 更激进的循环展开、内联、向量化，网络栈吞吐提升 3-8%
@@ -799,7 +812,10 @@ jobs:
 
           # --- NAP CPU 空闲管理器 ---
           # 浅睡眠策略，VPS 网络包唤醒延迟从 100-200μs 降至 ~10μs
-          scripts/config --enable CPU_IDLE_GOV_NAP
+          # 仅在 NAP 补丁成功应用时启用
+          if [[ "${{ env.NAP_APPLIED }}" == "true" ]]; then
+            scripts/config --enable CPU_IDLE_GOV_NAP
+          fi
 
           # --- ZRAM 增强 ---
           scripts/config --enable ZRAM
@@ -825,7 +841,10 @@ jobs:
 
           # --- [T3] Reflex Governor 极低延迟空闲管理器 ---
           # 比 NAP 更激进的最小化唤醒延迟策略
-          scripts/config --enable CPU_IDLE_GOV_REFLEX
+          # 仅在 Reflex 补丁成功应用时启用
+          if [[ "${{ env.REFLEX_APPLIED }}" == "true" ]]; then
+            scripts/config --enable CPU_IDLE_GOV_REFLEX
+          fi
 
           # --- 网络诊断加速（ss/ip 等工具依赖）---
           scripts/config --enable INET_DIAG
