@@ -115,7 +115,7 @@ jobs:
           echo "BUILD_TIMESTAMP=$(date -u +%Y%m%d%H%M)" >> $GITHUB_ENV
 
       - name: 📥 检出仓库代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: 🔧 安装构建依赖（最新版工具链）
         env:
@@ -244,7 +244,7 @@ jobs:
           mkdir -p ${{ github.workspace }}/.ccache
 
       - name: 📦 恢复 ccache 缓存
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/.ccache
           # 每次构建使用唯一 key（run_id + run_attempt），确保重跑也能保存新缓存
@@ -672,13 +672,13 @@ jobs:
           ls -lh linux-*.deb
 
       - name: 📤 上传配置文件
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: config-${{ matrix.arch }}-${{ matrix.branch }}
           path: ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
       - name: 📤 上传 Deb 包
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}-${{ matrix.branch }}
           path: ./kernel/linux-*.deb
