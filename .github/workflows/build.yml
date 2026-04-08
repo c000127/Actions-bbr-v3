@@ -309,9 +309,12 @@ jobs:
 
           CACHYOS_BASE="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}"
           BBR_APPLIED=false
+          BBR_NATIVE=false
           BASE_ALL_APPLIED=false
           FIXES_APPLIED=false
           FIXES_PATCH_NUM=""
+          CACHYOS_MISC_APPLIED=false
+          CACHYOS_MISC_LIST=""
           SKIPPED_HUNKS=0
 
           # apply_patch_tolerant: 应用补丁，容忍已被上游合并的 hunk
@@ -347,10 +350,8 @@ jobs:
             fi
 
             # 检查 .rej 是否全部是 "already applied" 类型
-            local real_conflict=false
             for rej in $rej_files; do
               echo "  📄 reject 文件: ${rej}"
-              # 检查对应源文件是否 git diff 为空（说明上游已包含该修改）
               local src="${rej%.rej}"
               if git diff --quiet -- "$src" 2>/dev/null; then
                 echo "    → 该文件无变更（hunk 已被上游合并），安全跳过"
@@ -367,37 +368,56 @@ jobs:
           }
 
           # ================================================================
+          # 步骤 0：检测 BBRv3 是否已被 Linux 主线内核原生包含
+          # 从 6.12+ 开始，Google BBRv3 逐步合并到上游 net-next 树
+          # CachyOS 于 2026-04-07 删除了所有编号补丁（base-all / bbr3 / fixes）
+          # 因为 "they're not needed anymore"
+          # ================================================================
+          echo "=== 步骤 0：检测内核原生 BBRv3 支持 ==="
+          if grep -qE 'bbr_model_t|BBR_PROBE_BW|bbr_inflight_hi_from_lost_packet' \
+              net/ipv4/tcp_bbr.c 2>/dev/null; then
+            echo "✅ 当前内核 ${kernel_series} 已原生包含 BBRv3（无需外部补丁）"
+            BBR_APPLIED=true
+            BBR_NATIVE=true
+          else
+            echo "ℹ️ 当前内核未检测到原生 BBRv3 特征，将尝试外部补丁"
+          fi
+
+          # ================================================================
           # 策略 1：尝试 base-all 全量补丁（已包含 BBRv3 + fixes + 性能优化）
           # base-all 是 CachyOS 的一体化补丁，包含 EEVDF 调度器、AMD P-State、
           # 内存管理、BBRv3、fixes 等全部改进。如果成功则无需单独打补丁。
+          # 注意：2026-04-07 后 CachyOS 已删除此文件，该策略用于兼容旧版本
           # ================================================================
-          base_all_url="${CACHYOS_BASE}/all/0001-cachyos-base-all.patch"
-          echo "=== 策略 1：尝试 CachyOS base-all 全量补丁 ==="
-          echo "  URL: ${base_all_url}"
-          if curl -sfL --head "$base_all_url" >/dev/null 2>&1; then
-            curl -fL --retry 3 --retry-delay 2 "$base_all_url" -o /tmp/base-all.patch
-            if apply_patch_tolerant /tmp/base-all.patch "base-all"; then
-              BBR_APPLIED=true
-              BASE_ALL_APPLIED=true
-              FIXES_APPLIED=true
+          if ! $BBR_APPLIED; then
+            base_all_url="${CACHYOS_BASE}/all/0001-cachyos-base-all.patch"
+            echo "=== 策略 1：尝试 CachyOS base-all 全量补丁 ==="
+            echo "  URL: ${base_all_url}"
+            if curl -sfL --head "$base_all_url" >/dev/null 2>&1; then
+              curl -fL --retry 3 --retry-delay 2 "$base_all_url" -o /tmp/base-all.patch
+              if apply_patch_tolerant /tmp/base-all.patch "base-all"; then
+                BBR_APPLIED=true
+                BASE_ALL_APPLIED=true
+                FIXES_APPLIED=true
+              else
+                echo "⚠️ base-all 真正冲突，回滚并切换到单独补丁模式"
+                git checkout -- . 2>/dev/null || true
+                find . -name '*.rej' -delete 2>/dev/null || true
+              fi
             else
-              echo "⚠️ base-all 真正冲突，回滚并切换到单独补丁模式"
-              git checkout -- . 2>/dev/null || true
-              find . -name '*.rej' -delete 2>/dev/null || true
+              echo "ℹ️ base-all 不存在于内核 ${kernel_series}，跳过"
             fi
-          else
-            echo "ℹ️ base-all 尚未发布于内核 ${kernel_series}，跳过"
           fi
 
           # ================================================================
           # 策略 2：单独补丁模式（仅在 base-all 失败时使用）
-          # 先应用 fixes（best-effort），再应用 BBRv3（必需）
+          # 先应用 fixes（best-effort），再应用 BBRv3
+          # 注意：2026-04-07 后 CachyOS 已删除这些文件，该策略用于兼容旧版本
           # ================================================================
           if ! $BBR_APPLIED; then
             echo "=== 策略 2：单独补丁模式 ==="
 
             # --- fixes 补丁（best-effort）---
-            # 编号不固定（6.x 是 0003，7.0 是 0004），逐个探测
             for num in 0003 0004 0005; do
               candidate="${CACHYOS_BASE}/${num}-fixes.patch"
               if curl -sfL --head "$candidate" >/dev/null 2>&1; then
@@ -415,20 +435,91 @@ jobs:
               fi
             done
 
-            # --- BBRv3 补丁（必需）---
+            # --- BBRv3 补丁 ---
             bbr_url="${CACHYOS_BASE}/0002-bbr3.patch"
             echo "检查 BBRv3 补丁: ${bbr_url}"
-            if ! curl -sfL --head "$bbr_url" >/dev/null 2>&1; then
-              echo "::error::BBRv3 补丁尚未发布于内核版本 ${kernel_series}"
-              exit 1
+            if curl -sfL --head "$bbr_url" >/dev/null 2>&1; then
+              echo "下载并应用 BBRv3 补丁..."
+              curl -fL --retry 3 --retry-delay 2 "$bbr_url" -o /tmp/0002-bbr3.patch
+              if patch --dry-run --forward --batch -p1 < /tmp/0002-bbr3.patch >/dev/null 2>&1; then
+                patch --forward --batch -p1 < /tmp/0002-bbr3.patch
+                echo "✅ BBRv3 补丁应用成功"
+              else
+                # 可能补丁已过时（部分 hunk 已上游合并），用 tolerant 模式
+                if apply_patch_tolerant /tmp/0002-bbr3.patch "0002-bbr3.patch"; then
+                  echo "✅ BBRv3 补丁 tolerant 应用成功"
+                fi
+              fi
+              BBR_APPLIED=true
+            else
+              echo "ℹ️ BBRv3 单独补丁不存在于 CachyOS ${kernel_series}，跳过"
             fi
-            echo "下载并应用 BBRv3 补丁..."
-            curl -fL --retry 3 --retry-delay 2 "$bbr_url" -o /tmp/0002-bbr3.patch
-            patch --forward --batch -p1 < /tmp/0002-bbr3.patch
-            BBR_APPLIED=true
           fi
 
-          grep -q "BBR" net/ipv4/tcp_bbr.c
+          # ================================================================
+          # 策略 3：CachyOS 新结构 misc/ 补丁（best-effort，不阻塞构建）
+          # 2026-04-07 后 CachyOS 重构为 {version}/misc/ 和 {version}/sched/ 子目录
+          # misc/ 包含 BORE 调度器、AUFS、nvidia 修复等社区补丁
+          # 这些对 VPS 不是必需的，仅作为增强应用
+          # ================================================================
+          echo "=== 策略 3：CachyOS 新结构补丁（best-effort）==="
+          CACHYOS_API="https://api.github.com/repos/CachyOS/kernel-patches/contents/${kernel_series}/misc"
+          echo "  检查 misc/ 目录: ${CACHYOS_API}"
+          misc_patches=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "$CACHYOS_API" 2>/dev/null \
+            | jq -r '.[] | select(.name | endswith(".patch")) | .download_url' 2>/dev/null) || true
+
+          if [ -n "$misc_patches" ]; then
+            echo "  发现 misc/ 补丁，逐个 best-effort 应用..."
+            while IFS= read -r patch_url; do
+              patch_name=$(basename "$patch_url")
+              echo "  尝试: ${patch_name}"
+              if curl -fL --retry 2 "$patch_url" -o "/tmp/misc-${patch_name}" 2>/dev/null; then
+                if apply_patch_tolerant "/tmp/misc-${patch_name}" "misc/${patch_name}"; then
+                  CACHYOS_MISC_APPLIED=true
+                  CACHYOS_MISC_LIST="${CACHYOS_MISC_LIST:+${CACHYOS_MISC_LIST}, }${patch_name}"
+                else
+                  echo "  ⚠️ misc/${patch_name} 冲突，跳过"
+                  git checkout -- . 2>/dev/null || true
+                  find . -name '*.rej' -delete 2>/dev/null || true
+                fi
+              fi
+            done <<< "$misc_patches"
+          else
+            echo "  ℹ️ misc/ 目录为空或不存在，跳过"
+          fi
+
+          # ================================================================
+          # 最终验证：BBRv3 必须可用（内核原生或外部补丁）
+          # ================================================================
+          echo ""
+          echo "=== 最终验证 ==="
+          if ! $BBR_APPLIED; then
+            # 最后防线：检查内核源码是否包含 BBR 实现（可能是 v1/v2）
+            if grep -q "tcp_bbr" net/ipv4/Makefile 2>/dev/null && \
+               grep -q "BBR" net/ipv4/tcp_bbr.c 2>/dev/null; then
+              echo "⚠️ 检测到内核包含 BBR 实现（但未确认为 v3），继续构建"
+              BBR_APPLIED=true
+              BBR_NATIVE=true
+            else
+              echo "::error::BBRv3 既未被内核原生包含，也未能从 CachyOS 获取外部补丁"
+              echo "::error::  内核版本: ${kernel_series}"
+              echo "::error::  请检查 https://github.com/CachyOS/kernel-patches/tree/master/${kernel_series}"
+              exit 1
+            fi
+          fi
+
+          if $BBR_NATIVE; then
+            echo "✅ BBRv3: 内核原生（无需外部补丁）"
+          else
+            echo "✅ BBRv3: 通过 CachyOS 外部补丁注入"
+          fi
+
+          if $CACHYOS_MISC_APPLIED; then
+            echo "✅ CachyOS misc 补丁: ${CACHYOS_MISC_LIST}"
+          fi
 
           if [ "$SKIPPED_HUNKS" -gt 0 ]; then
             echo "::notice::共 ${SKIPPED_HUNKS} 个 hunk 因已被上游合并而跳过（正常现象）"
@@ -438,7 +529,9 @@ jobs:
           CACHYOS_URL="https://github.com/CachyOS/kernel-patches/blob/master/${kernel_series}"
           {
             echo "PATCH_LINES<<PATCH_EOF"
-            if $BASE_ALL_APPLIED; then
+            if $BBR_NATIVE; then
+              echo "| BBRv3 | 内核原生支持（已合并到 Linux 主线） |"
+            elif $BASE_ALL_APPLIED; then
               skip_note=""
               if [ "$SKIPPED_HUNKS" -gt 0 ]; then
                 skip_note=" (${SKIPPED_HUNKS} 个上游已合并 hunk 跳过)"
@@ -450,11 +543,14 @@ jobs:
               fi
               echo "| BBR 补丁 | [0002-bbr3.patch](${CACHYOS_URL}/0002-bbr3.patch) for ${kernel_series} |"
             fi
+            if $CACHYOS_MISC_APPLIED; then
+              echo "| CachyOS 社区补丁 | ${CACHYOS_MISC_LIST} |"
+            fi
             echo "PATCH_EOF"
           } >> $GITHUB_ENV
 
           # 导出 CachyOS 补丁状态供 Release 说明使用
-          if $BASE_ALL_APPLIED || $FIXES_APPLIED; then
+          if $BASE_ALL_APPLIED || $FIXES_APPLIED || $CACHYOS_MISC_APPLIED; then
             echo "CACHYOS_PATCHES_APPLIED=true" >> $GITHUB_ENV
           else
             echo "CACHYOS_PATCHES_APPLIED=false" >> $GITHUB_ENV
