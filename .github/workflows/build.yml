@@ -313,8 +313,6 @@ jobs:
           BASE_ALL_APPLIED=false
           FIXES_APPLIED=false
           FIXES_PATCH_NUM=""
-          CACHYOS_MISC_APPLIED=false
-          CACHYOS_MISC_LIST=""
           SKIPPED_HUNKS=0
 
           # apply_patch_tolerant: 应用补丁，容忍已被上游合并的 hunk
@@ -457,39 +455,14 @@ jobs:
           fi
 
           # ================================================================
-          # 策略 3：CachyOS 新结构 misc/ 补丁（best-effort，不阻塞构建）
-          # 2026-04-07 后 CachyOS 重构为 {version}/misc/ 和 {version}/sched/ 子目录
-          # misc/ 包含 BORE 调度器、AUFS、nvidia 修复等社区补丁
-          # 这些对 VPS 不是必需的，仅作为增强应用
+          # 策略 3 已移除：CachyOS misc/ 补丁不适用于 VPS 构建
+          # 原因：misc/ 包含 nap-governor、handheld、acpi-call、clang-polly 等
+          # 面向桌面/手持设备的补丁，其中 nap-governor.patch 使用了内核空间
+          # 不可用的 sqrtf()（libm 用户态函数），导致链接错误：
+          #   undefined reference to `sqrtf' in nap_fpu.c:193
+          # 这些补丁对 VPS 无实际价值，且引入编译风险，因此跳过
           # ================================================================
-          echo "=== 策略 3：CachyOS 新结构补丁（best-effort）==="
-          CACHYOS_API="https://api.github.com/repos/CachyOS/kernel-patches/contents/${kernel_series}/misc"
-          echo "  检查 misc/ 目录: ${CACHYOS_API}"
-          misc_patches=$(curl -sf \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "$CACHYOS_API" 2>/dev/null \
-            | jq -r '.[] | select(.name | endswith(".patch")) | .download_url' 2>/dev/null) || true
-
-          if [ -n "$misc_patches" ]; then
-            echo "  发现 misc/ 补丁，逐个 best-effort 应用..."
-            while IFS= read -r patch_url; do
-              patch_name=$(basename "$patch_url")
-              echo "  尝试: ${patch_name}"
-              if curl -fL --retry 2 "$patch_url" -o "/tmp/misc-${patch_name}" 2>/dev/null; then
-                if apply_patch_tolerant "/tmp/misc-${patch_name}" "misc/${patch_name}"; then
-                  CACHYOS_MISC_APPLIED=true
-                  CACHYOS_MISC_LIST="${CACHYOS_MISC_LIST:+${CACHYOS_MISC_LIST}, }${patch_name}"
-                else
-                  echo "  ⚠️ misc/${patch_name} 冲突，跳过"
-                  git checkout -- . 2>/dev/null || true
-                  find . -name '*.rej' -delete 2>/dev/null || true
-                fi
-              fi
-            done <<< "$misc_patches"
-          else
-            echo "  ℹ️ misc/ 目录为空或不存在，跳过"
-          fi
+          echo "=== 策略 3：跳过 CachyOS misc/ 补丁（不适用于 VPS）==="
 
           # ================================================================
           # 最终验证：BBRv3 必须可用（内核原生或外部补丁）
@@ -517,9 +490,6 @@ jobs:
             echo "✅ BBRv3: 通过 CachyOS 外部补丁注入"
           fi
 
-          if $CACHYOS_MISC_APPLIED; then
-            echo "✅ CachyOS misc 补丁: ${CACHYOS_MISC_LIST}"
-          fi
 
           if [ "$SKIPPED_HUNKS" -gt 0 ]; then
             echo "::notice::共 ${SKIPPED_HUNKS} 个 hunk 因已被上游合并而跳过（正常现象）"
@@ -543,14 +513,11 @@ jobs:
               fi
               echo "| BBR 补丁 | [0002-bbr3.patch](${CACHYOS_URL}/0002-bbr3.patch) for ${kernel_series} |"
             fi
-            if $CACHYOS_MISC_APPLIED; then
-              echo "| CachyOS 社区补丁 | ${CACHYOS_MISC_LIST} |"
-            fi
             echo "PATCH_EOF"
           } >> $GITHUB_ENV
 
           # 导出 CachyOS 补丁状态供 Release 说明使用
-          if $BASE_ALL_APPLIED || $FIXES_APPLIED || $CACHYOS_MISC_APPLIED; then
+          if $BASE_ALL_APPLIED || $FIXES_APPLIED; then
             echo "CACHYOS_PATCHES_APPLIED=true" >> $GITHUB_ENV
           else
             echo "CACHYOS_PATCHES_APPLIED=false" >> $GITHUB_ENV
