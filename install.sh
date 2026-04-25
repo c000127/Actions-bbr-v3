@@ -283,6 +283,61 @@ normalize_version() {
     fi
 }
 
+# 函数：生成 tag 的排序键（正式版 > rc 预发布）
+# 例：7.0-mainline-beta > 7.0-rc7-mainline-beta > 7.0-rc6-mainline-beta
+kernel_tag_sort_key() {
+    local tag="$1"
+    local branch="$2"
+    local core="$tag"
+    local major minor patch rc
+    local release_weight rc_weight
+
+    core="${core#x86_64-}"
+    core="${core#arm64-}"
+
+    case "$branch" in
+        beta)
+            core="${core%-mainline-beta}"
+            core="${core%-beta}"
+            ;;
+        mainline|stable)
+            core="${core%-${branch}}"
+            ;;
+    esac
+
+    core=$(normalize_version "$core")
+
+    if [[ "$core" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-rc([0-9]+))?$ ]]; then
+        major="${BASH_REMATCH[1]}"
+        minor="${BASH_REMATCH[2]}"
+        patch="${BASH_REMATCH[3]}"
+        rc="${BASH_REMATCH[5]:-}"
+
+        if [[ -n "$rc" ]]; then
+            release_weight=0
+            rc_weight="$rc"
+        else
+            release_weight=1
+            rc_weight=999999
+        fi
+
+        printf "%08d.%08d.%08d.%d.%08d" "$major" "$minor" "$patch" "$release_weight" "$rc_weight"
+    else
+        echo "00000000.00000000.00000000.0.00000000"
+    fi
+}
+
+# 函数：按内核版本从新到旧排序 tags
+sort_kernel_tags_desc() {
+    local branch="$1"
+    local tags="$2"
+
+    while IFS= read -r tag; do
+        [[ -z "$tag" ]] && continue
+        printf "%s\t%s\n" "$(kernel_tag_sort_key "$tag" "$branch")" "$tag"
+    done <<< "$tags" | sort -r | cut -f2
+}
+
 # 函数：获取已安装的内核版本（去除品牌后缀，返回版本号+分支）
 get_installed_version() {
     local pkg
@@ -510,8 +565,14 @@ install_latest_version() {
         TAG_REGEX="${SELECTED_BRANCH}(?!.*beta)"
     fi
 
-    LATEST_TAG_NAME=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$TAG_REGEX" \
-        '[.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch))][0].tag_name')
+    MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$TAG_REGEX" \
+        '.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch)) | .tag_name')
+
+    if [[ -n "$MATCH_TAGS" ]]; then
+        MATCH_TAGS=$(sort_kernel_tags_desc "$SELECTED_BRANCH" "$MATCH_TAGS")
+    fi
+
+    LATEST_TAG_NAME=$(echo "$MATCH_TAGS" | head -n 1)
 
     if [[ -z "$LATEST_TAG_NAME" || "$LATEST_TAG_NAME" == "null" ]]; then
         echo -e "\033[31m未找到适合当前架构 ($ARCH) 的 ${SELECTED_BRANCH} 分支最新版本。\033[0m"
@@ -582,6 +643,8 @@ install_specific_version() {
             echo -e "\033[31m未找到适合当前架构的 ${SELECTED_BRANCH} 分支版本。\033[0m"
             return 1
         fi
+
+        MATCH_TAGS=$(sort_kernel_tags_desc "$SELECTED_BRANCH" "$MATCH_TAGS")
 
         echo -e "\033[36m以下为 ${SELECTED_BRANCH} 分支适用于当前架构的版本：\033[0m"
         IFS=$'\n' read -rd '' -a TAG_ARRAY <<<"$MATCH_TAGS"
