@@ -118,9 +118,9 @@ jobs:
             echo "下载成功: ${LINES} 行, ${SIZE}"
 
             # 验证 BBRv3 特征
-            HAS_VERSION=$(grep -cP 'BBR_VERSION\s+3' /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
-            HAS_ECN=$(grep -c 'bbr_ecn_alpha' /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
-            HAS_LOSS=$(grep -c 'bbr_loss_thresh' /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
+            HAS_VERSION=$(grep -o 'BBR_VERSION' /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
+            HAS_ECN=$(grep -o 'bbr_ecn_alpha' /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
+            HAS_LOSS=$(grep -o 'bbr_loss_thresh' /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
 
             echo "BBRv3 特征检测:"
             echo "  BBR_VERSION 3: $HAS_VERSION 处"
@@ -165,7 +165,8 @@ jobs:
           for sym in bbr_ecn_alpha bbr_loss_thresh bbr_ecn_max_rtt_us bbr_bw_rtts \
                      bbr_ecnece_ecn_ce bbr_target_inflight bbr_sndbuf_expand \
                      BBR_VERSION; do
-            count=$(grep -c "$sym" /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
+            # grep -c 可能返回多行（二进制文件），用 grep + wc -l 替代
+            count=$(grep -o "$sym" /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
             if [[ "$count" -gt 0 ]]; then
               echo "  ✅ $sym ($count 处)"
             fi
@@ -176,8 +177,8 @@ jobs:
           echo "=== BBRv1 独有符号（BBRv3 中可能已移除）==="
           for sym in bbr_lt_bw_sampling bbr_lt_intvl_min_rtts bbr_lt_loss_thresh \
                      lt_is_sampling lt_bw lt_use_bw; do
-            v1_count=$(grep -c "$sym" net/ipv4/tcp_bbr.c 2>/dev/null || echo 0)
-            v3_count=$(grep -c "$sym" /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
+            v1_count=$(grep -o "$sym" net/ipv4/tcp_bbr.c 2>/dev/null | wc -l)
+            v3_count=$(grep -o "$sym" /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
             if [[ "$v1_count" -gt 0 && "$v3_count" -eq 0 ]]; then
               echo "  ⚠️ $sym (v1: $v1_count → v3: 已移除)"
             fi
@@ -376,12 +377,13 @@ jobs:
           echo "========================================="
 
       - name: 📤 上传编译日志
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: compile-log-${{ matrix.branch }}
           path: /tmp/compile_bbr.log
           retention-days: 7
+          if-no-files-found: ignore
 
   # ============================================================
   # Job 3: 汇总报告
