@@ -503,11 +503,11 @@ jobs:
           # -j$(nproc): 充分利用所有 CPU 核心
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3 \
+              LOCALVERSION=-${{ env.XANMOD_BRANCH }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           else
             make bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ matrix.branch }}-c000127-bbrv3 \
+              LOCALVERSION=-${{ env.XANMOD_BRANCH }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           fi
           BUILD_END=$(date +%s)
@@ -528,18 +528,18 @@ jobs:
       - name: 📤 上传配置文件
         uses: actions/upload-artifact@v7
         with:
-          name: config-${{ matrix.arch }}-${{ matrix.branch }}
+          name: config-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}
           path: ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
       - name: 📤 上传 Deb 包
         uses: actions/upload-artifact@v7
         with:
-          name: deb-${{ matrix.arch }}-${{ matrix.branch }}
+          name: deb-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}
           path: ./kernel/linux-*.deb
 
       - name: 🧹 清理已有 Release 资源
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.XANMOD_BRANCH }}"
           RELEASE=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
@@ -557,24 +557,24 @@ jobs:
       - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}
+          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.XANMOD_BRANCH }}
           files: ./kernel/linux-*.deb
 
       - name: 🔄 更新 Release 说明
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.branch }}"
+          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.XANMOD_BRANCH }}"
           RELEASE_ID=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
             | jq -r '.id')
           if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
-            BODY="## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ matrix.branch }}) with BBRv3 — ${{ matrix.arch }}
+            BODY="## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ env.XANMOD_BRANCH }}) with BBRv3 — ${{ matrix.arch }}
 
           | 项目 | 值 |
           |---|---|
           | 内核版本 | ${{ env.KERNEL_VERSION }} |
-          | 内核分支 | ${{ matrix.branch }} |
+          | 内核分支 | ${{ env.XANMOD_BRANCH }} |
           | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
           | 架构 | ${{ matrix.arch }} |
           ${{ env.PATCH_LINES }}
