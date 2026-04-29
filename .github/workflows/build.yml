@@ -482,7 +482,7 @@ jobs:
         env:
           # 固定构建元数据，避免时间戳差异导致 ccache 缓存失效
           KBUILD_BUILD_TIMESTAMP: ''
-          KBUILD_BUILD_USER: github
+          KBUILD_BUILD_USER: c000127
           KBUILD_BUILD_HOST: github
           # 使用 zstd 压缩 .deb 内部数据（压缩快、体积小）
           KDEB_COMPRESS: zstd
