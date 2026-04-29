@@ -17,20 +17,6 @@ jobs:
         include:
           - arch: x86_64
             runs_on: ubuntu-latest
-            branch: mainline
-            xanmod_branch: "7.0"
-          - arch: x86_64
-            runs_on: ubuntu-latest
-            branch: stable
-            xanmod_branch: "6.18"
-          #- arch: arm64
-          #  runs_on: ubuntu-24.04-arm
-          #  branch: mainline
-          #  xanmod_branch: "7.0"
-          #- arch: arm64
-          #  runs_on: ubuntu-24.04-arm
-          #  branch: stable
-          #  xanmod_branch: "6.18"
     runs-on: ${{ matrix.runs_on }}
     env:
       ARCH: ${{ matrix.arch }}
@@ -59,34 +45,33 @@ jobs:
         id: get_kernel_version
         run: |
           set -euo pipefail
-          echo "XanMod 分支: ${{ matrix.xanmod_branch }}"
 
-          # 从 XanMod GitLab 获取最新 tag
+          # 从 XanMod GitLab 获取最新 tag（所有分支中版本最高的）
           # tag 格式: 7.0.2-xanmod1 或 6.18.25-xanmod1
-          XANMOD_TAGS=$(git -c 'versionsort.suffix=-rc' ls-remote \
+          XANMOD_TAG=$(git -c 'versionsort.suffix=-rc' ls-remote \
             --tags --refs --sort=-version:refname \
             https://gitlab.com/xanmod/linux.git \
-            "${{ matrix.xanmod_branch }}.*-xanmod*" \
-            2>/dev/null | head -10 | awk '{print $2}' | sed 's|refs/tags/||' || true)
+            "*-xanmod*" \
+            2>/dev/null | head -1 | awk '{print $2}' | sed 's|refs/tags/||')
 
-          if [[ -z "$XANMOD_TAGS" ]]; then
-            echo "::error::无法从 XanMod GitLab 获取 tag"
+          if [[ -z "$XANMOD_TAG" ]]; then
+            echo "::error::无法从 XanMod GitLab 获取最新 tag"
             exit 1
           fi
 
-          # 取最新 tag（已按版本排序）
-          XANMOD_TAG=$(echo "$XANMOD_TAGS" | head -1)
           echo "最新 XanMod tag: $XANMOD_TAG"
 
           # 提取内核版本号（去掉 -xanmodN 后缀）
           KERNEL_VERSION=$(echo "$XANMOD_TAG" | sed 's/-xanmod[0-9]*$//')
+          # 提取 XanMod 分支号（如 7.0、6.18）
+          XANMOD_BRANCH=$(echo "$KERNEL_VERSION" | grep -oP '^\d+\.\d+')
           echo "内核版本: $KERNEL_VERSION"
+          echo "XanMod 分支: $XANMOD_BRANCH"
 
           echo "获取到内核版本: $KERNEL_VERSION (XanMod: $XANMOD_TAG)"
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
           echo "XANMOD_TAG=$XANMOD_TAG" >> $GITHUB_ENV
-          # 提取主版本号（用于 ccache key）
-          echo "KERNEL_SERIES=$(echo "$KERNEL_VERSION" | grep -oP '^\d+\.\d+')" >> $GITHUB_ENV
+          echo "XANMOD_BRANCH=$XANMOD_BRANCH" >> $GITHUB_ENV
           # 构建时间戳（精确到分钟），用于区分同一内核版本的多次编译
           echo "BUILD_TIMESTAMP=$(date -u +%Y%m%d%H%M)" >> $GITHUB_ENV
 
@@ -225,9 +210,9 @@ jobs:
           path: ${{ github.workspace }}/.ccache
           # 每次构建使用唯一 key（run_id + run_attempt），确保重跑也能保存新缓存
           # 恢复时按 arch+xanmod_branch 前缀匹配最近一次缓存
-          key: ccache-${{ matrix.arch }}-${{ matrix.xanmod_branch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-${{ matrix.arch }}-${{ matrix.xanmod_branch }}-
+            ccache-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}-
 
       - name: 🔧 配置 ccache 编译加速
         env:
@@ -626,8 +611,8 @@ jobs:
           # 删除当前 arch+xanmod_branch 的所有旧缓存条目（排除本次即将保存的 key）
           # actions/cache 的 post-action 会在 job 结束时保存新条目
           # 避免旧条目堆积超出 GitHub Actions 10 GB 总缓存限额
-          PREFIX="ccache-${{ matrix.arch }}-${{ matrix.xanmod_branch }}-"
-          CURRENT_KEY="ccache-${{ matrix.arch }}-${{ matrix.xanmod_branch }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          PREFIX="ccache-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}-"
+          CURRENT_KEY="ccache-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}-${{ github.run_id }}-${{ github.run_attempt }}"
           echo "清理缓存前缀: ${PREFIX}（保留: ${CURRENT_KEY}）"
           gh cache list --key "${PREFIX}" --json key -q '.[].key' | while read key; do
             if [ "${key}" = "${CURRENT_KEY}" ]; then
