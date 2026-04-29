@@ -2,12 +2,6 @@ name: BBRv3 兼容性测试
 
 on:
   workflow_dispatch:
-  # 每周一自动测试（及时发现内核 API 变化）
-  schedule:
-    - cron: '0 8 * * 1'
-
-permissions:
-  contents: read
 
 env:
   GOOGLE_BBR_URL: "https://raw.githubusercontent.com/google/bbr/v3/net/ipv4/tcp_bbr.c"
