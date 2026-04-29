@@ -18,15 +18,19 @@ jobs:
           - arch: x86_64
             runs_on: ubuntu-latest
             branch: mainline
+            xanmod_branch: "7.0"
           - arch: x86_64
             runs_on: ubuntu-latest
             branch: stable
+            xanmod_branch: "6.18"
           #- arch: arm64
           #  runs_on: ubuntu-24.04-arm
           #  branch: mainline
+          #  xanmod_branch: "7.0"
           #- arch: arm64
           #  runs_on: ubuntu-24.04-arm
           #  branch: stable
+          #  xanmod_branch: "6.18"
     runs-on: ${{ matrix.runs_on }}
     env:
       ARCH: ${{ matrix.arch }}
@@ -51,66 +55,38 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - name: 📋 获取最新内核版本
+      - name: 📋 获取最新 XanMod 内核版本
         id: get_kernel_version
         run: |
-          echo "选择的内核分支: ${{ matrix.branch }}"
+          set -euo pipefail
+          echo "XanMod 分支: ${{ matrix.xanmod_branch }}"
 
-          # 从 kernel.org 获取版本
-          korg_version=$(curl -sL --retry 3 https://www.kernel.org \
-            | grep -A1 -m1 "${{ matrix.branch }}:" \
-            | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?') || true
+          # 从 XanMod GitLab 获取最新 tag
+          # tag 格式: 7.0.2-xanmod1 或 6.18.25-xanmod1
+          XANMOD_TAGS=$(git -c 'versionsort.suffix=-rc' ls-remote \
+            --tags --refs --sort=-version:refname \
+            https://gitlab.com/xanmod/linux.git \
+            "${{ matrix.xanmod_branch }}.*-xanmod*" \
+            2>/dev/null | head -10 | awk '{print $2}' | sed 's|refs/tags/||' || true)
 
-          if [[ "${{ matrix.branch }}" == "mainline" ]]; then
-            # mainline 额外检查 torvalds/linux 仓库最新 tag
-            # GitHub tag 更新通常比 kernel.org 更快（如 kernel.org 显示 rc2 时 GitHub 已有 rc3）
-            echo "检查 torvalds/linux 仓库最新 tag..."
-            # versionsort.suffix=-rc 让 git 将 -rc 视为预发布后缀
-            # 排序结果：v7.0 > v7.0-rc3 > v7.0-rc2 > v6.15 > ...
-            gh_version=$(git -c 'versionsort.suffix=-rc' ls-remote \
-              --tags --refs --sort=-version:refname \
-              https://github.com/torvalds/linux.git 'v[0-9]*' \
-              | head -5 | awk '{print $2}' | sed 's|refs/tags/v||' \
-              | grep -P '^\d+\.\d+(-rc\d+)?$' \
-              | head -1) || true
-
-            echo "kernel.org 版本: ${korg_version:-无}"
-            echo "torvalds/linux 最新 tag: ${gh_version:-无}"
-
-            if [[ -n "$korg_version" && -n "$gh_version" ]]; then
-              # 使用 dpkg 版本比较（~ 在 Debian 规则中排序最低）
-              # 7.0~rc2 < 7.0~rc3 < 7.0，完美匹配内核版本语义
-              korg_deb=$(echo "$korg_version" | sed 's/-rc/~rc/')
-              gh_deb=$(echo "$gh_version" | sed 's/-rc/~rc/')
-              if dpkg --compare-versions "$gh_deb" gt "$korg_deb"; then
-                echo "✅ torvalds/linux 版本更新，使用 $gh_version（kernel.org: $korg_version）"
-                version="$gh_version"
-              else
-                echo "ℹ️ kernel.org 版本相同或更新，使用 $korg_version"
-                version="$korg_version"
-              fi
-            elif [[ -n "$gh_version" ]]; then
-              echo "⚠️ kernel.org 获取失败，使用 torvalds/linux tag: $gh_version"
-              version="$gh_version"
-            elif [[ -n "$korg_version" ]]; then
-              version="$korg_version"
-            else
-              echo "::error::无法从 kernel.org 和 torvalds/linux 获取内核版本号"
-              exit 1
-            fi
-          else
-            # stable 分支只从 kernel.org 获取
-            version="$korg_version"
-            if [[ -z "$version" ]]; then
-              echo "::error::无法从 kernel.org 获取内核版本号"
-              exit 1
-            fi
+          if [[ -z "$XANMOD_TAGS" ]]; then
+            echo "::error::无法从 XanMod GitLab 获取 tag"
+            exit 1
           fi
 
-          echo "获取到内核版本: $version"
-          echo "KERNEL_VERSION=$version" >> $GITHUB_ENV
-          # 提取主版本号（用于 ccache key 和补丁查找）
-          echo "KERNEL_SERIES=$(echo "$version" | grep -oP '^\d+\.\d+')" >> $GITHUB_ENV
+          # 取最新 tag（已按版本排序）
+          XANMOD_TAG=$(echo "$XANMOD_TAGS" | head -1)
+          echo "最新 XanMod tag: $XANMOD_TAG"
+
+          # 提取内核版本号（去掉 -xanmodN 后缀）
+          KERNEL_VERSION=$(echo "$XANMOD_TAG" | sed 's/-xanmod[0-9]*$//')
+          echo "内核版本: $KERNEL_VERSION"
+
+          echo "获取到内核版本: $KERNEL_VERSION (XanMod: $XANMOD_TAG)"
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          echo "XANMOD_TAG=$XANMOD_TAG" >> $GITHUB_ENV
+          # 提取主版本号（用于 ccache key）
+          echo "KERNEL_SERIES=$(echo "$KERNEL_VERSION" | grep -oP '^\d+\.\d+')" >> $GITHUB_ENV
           # 构建时间戳（精确到分钟），用于区分同一内核版本的多次编译
           echo "BUILD_TIMESTAMP=$(date -u +%Y%m%d%H%M)" >> $GITHUB_ENV
 
@@ -248,10 +224,10 @@ jobs:
         with:
           path: ${{ github.workspace }}/.ccache
           # 每次构建使用唯一 key（run_id + run_attempt），确保重跑也能保存新缓存
-          # 恢复时按 arch+series+branch 前缀匹配最近一次缓存
-          key: ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # 恢复时按 arch+xanmod_branch 前缀匹配最近一次缓存
+          key: ccache-${{ matrix.arch }}-${{ matrix.xanmod_branch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-
+            ccache-${{ matrix.arch }}-${{ matrix.xanmod_branch }}-
 
       - name: 🔧 配置 ccache 编译加速
         env:
@@ -279,249 +255,47 @@ jobs:
           echo "ccache 配置完成:"
           ccache -p | grep -E 'max_size|compression|depend_mode|sloppiness|direct_mode'
 
-      - name: ⬇️ 下载内核源代码
+      - name: ⬇️ 下载 XanMod 内核源代码
         run: |
           set -euo pipefail
           mkdir -p ./kernel
-          cd ./kernel
-          # 分支判断：mainline 从 Torvalds 库获取 Tag，stable 从 Greg 库获取分支
-          if [[ "${{ matrix.branch }}" == "mainline" ]]; then
-            echo "Mainline 分支，从 Torvalds 仓库克隆 v${{ env.KERNEL_VERSION }}..."
-            git clone --depth=1 --single-branch --no-tags --branch v${{ env.KERNEL_VERSION }} \
-              https://github.com/torvalds/linux.git linux
-          else
-            echo "Stable 分支，从 kernel.org 仓库克隆分支..."
-            branch=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
-            git clone --depth=1 --single-branch --no-tags --branch linux-${branch}.y \
-              https://github.com/gregkh/linux.git linux
-          fi
-          echo "内核源码下载完成，目录大小: $(du -sh linux | cut -f1)"
+          echo "克隆 XanMod linux @ ${{ env.XANMOD_TAG }} ..."
+          git clone --depth=1 --single-branch --no-tags \
+            --branch "${{ env.XANMOD_TAG }}" \
+            https://gitlab.com/xanmod/linux.git ./kernel/linux
+          echo "内核源码下载完成，目录大小: $(du -sh ./kernel/linux | cut -f1)"
 
-      - name: 🩹 注入 BBRv3 + 性能补丁
+      - name: ✅ 验证 BBRv3 内置
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
-          kernel_series=$(echo "${{ env.KERNEL_VERSION }}" | grep -oP '^\d+\.\d+')
-          if [ -z "$kernel_series" ]; then
-            echo "无法从 KERNEL_VERSION=${{ env.KERNEL_VERSION }} 解析内核主版本号"
-            exit 1
-          fi
+          echo "=== 验证 XanMod 内核包含 BBRv3 ==="
 
-          # === 补丁来源定义 ===
-          # 优先级：本地仓库 → CachyOS master → CachyOS pinned commit
-          LOCAL_PATCHES="${{ github.workspace }}/patches/${kernel_series}"
-          CACHYOS_BASE="https://raw.githubusercontent.com/CachyOS/kernel-patches/master/${kernel_series}"
-          CACHYOS_PINNED="https://raw.githubusercontent.com/CachyOS/kernel-patches/c1ba300617a12d257b5721572b9bbe28efae182f/${kernel_series}"
-
-          BBR_APPLIED=false
-          BBR_NATIVE=false
-          BBR_SOURCE=""
-          BASE_ALL_APPLIED=false
-          FIXES_APPLIED=false
-          FIXES_PATCH_NUM=""
-          SKIPPED_HUNKS=0
-
-          # apply_patch_tolerant: 应用补丁，容忍已被上游合并的 hunk
-          apply_patch_tolerant() {
-            local patch_file="$1"
-            local patch_name="$2"
-
-            if patch --dry-run --forward --batch -p1 < "$patch_file" >/dev/null 2>&1; then
-              patch --forward --batch -p1 < "$patch_file"
-              echo "✅ ${patch_name} 完美应用（无冲突）"
-              return 0
-            fi
-
-            find . -name '*.rej' -delete 2>/dev/null || true
-            echo "ℹ️ ${patch_name} 存在部分已上游合并的 hunk，尝试 --force 模式..."
-            patch --forward --batch --force -p1 < "$patch_file" 2>&1 || true
-
-            local rej_count
-            rej_count=$(find . -name '*.rej' 2>/dev/null | wc -l)
-
-            if [ "$rej_count" -eq 0 ]; then
-              echo "✅ ${patch_name} 应用成功（所有 hunk 已应用或已被上游合并）"
-              return 0
-            fi
-
-            local rej_files
-            rej_files=$(find . -name '*.rej' 2>/dev/null)
-            for rej in $rej_files; do
-              echo "  📄 reject: ${rej}"
-            done
-
-            find . -name '*.rej' -delete 2>/dev/null || true
-            SKIPPED_HUNKS=$((SKIPPED_HUNKS + rej_count))
-            echo "✅ ${patch_name} 应用完成（${rej_count} 个已上游合并的 hunk 被跳过）"
-            return 0
-          }
-
-          # ================================================================
-          # 步骤 0：检测 BBRv3 是否已被 Linux 主线内核原生包含
-          # BBRv3 独有符号：BBR_VERSION 3、bbr_ecn_alpha、bbr_loss_thresh
-          # BBRv1 已有 BBR_PROBE_BW 等，不能用作 v3 检测
-          # ================================================================
-          echo "=== 步骤 0：检测内核原生 BBRv3 支持 ==="
-          if grep -qP 'BBR_VERSION\s+3' net/ipv4/tcp_bbr.c 2>/dev/null && \
-             grep -q 'bbr_ecn_alpha' net/ipv4/tcp_bbr.c 2>/dev/null && \
-             grep -q 'bbr_loss_thresh' net/ipv4/tcp_bbr.c 2>/dev/null; then
-            echo "✅ 当前内核 ${kernel_series} 已原生包含 BBRv3（无需外部补丁）"
-            BBR_APPLIED=true
-            BBR_NATIVE=true
-            BBR_SOURCE="内核原生支持"
-          else
-            echo "ℹ️ 当前内核未检测到原生 BBRv3 特征，将尝试外部补丁"
-          fi
-
-          # ================================================================
-          # 策略 1：本地补丁仓库（patches/${kernel_series}/0002-bbr3.patch）
-          # 最可靠的来源 — 已验证的补丁存储在本项目仓库中
-          # ================================================================
-          if ! $BBR_APPLIED; then
-            echo "=== 策略 1：检查本地补丁仓库 ==="
-            local_bbr="${LOCAL_PATCHES}/0002-bbr3.patch"
-            if [ -f "$local_bbr" ]; then
-              echo "  发现本地补丁: ${local_bbr}"
-              if apply_patch_tolerant "$local_bbr" "local/0002-bbr3.patch"; then
-                BBR_APPLIED=true
-                BBR_SOURCE="本地仓库补丁 (patches/${kernel_series})"
-              else
-                echo "  ⚠️ 本地补丁冲突，回滚"
-                git checkout -- . 2>/dev/null || true
-                find . -name '*.rej' -delete 2>/dev/null || true
-              fi
-            else
-              echo "  ℹ️ 本地补丁不存在: ${local_bbr}"
-            fi
-          fi
-
-          # ================================================================
-          # 策略 2：CachyOS base-all 全量补丁
-          # 包含 BBRv3 + fixes + 性能优化的一体化补丁
-          # 2026-04-07 后已被删除，保留用于未来可能恢复
-          # ================================================================
-          if ! $BBR_APPLIED; then
-            base_all_url="${CACHYOS_BASE}/all/0001-cachyos-base-all.patch"
-            echo "=== 策略 2：尝试 CachyOS base-all 全量补丁 ==="
-            if curl -sfL --head "$base_all_url" >/dev/null 2>&1; then
-              curl -fL --retry 3 --retry-delay 2 "$base_all_url" -o /tmp/base-all.patch
-              if apply_patch_tolerant /tmp/base-all.patch "base-all"; then
-                BBR_APPLIED=true
-                BASE_ALL_APPLIED=true
-                FIXES_APPLIED=true
-                BBR_SOURCE="CachyOS base-all"
-              else
-                echo "⚠️ base-all 冲突，回滚"
-                git checkout -- . 2>/dev/null || true
-                find . -name '*.rej' -delete 2>/dev/null || true
-              fi
-            else
-              echo "  ℹ️ base-all 不存在，跳过"
-            fi
-          fi
-
-          # ================================================================
-          # 策略 3：CachyOS 单独 BBRv3 补丁（多源回退）
-          # 尝试顺序：master → pinned commit c1ba300
-          # ================================================================
-          if ! $BBR_APPLIED; then
-            echo "=== 策略 3：CachyOS 单独补丁 ==="
-
-            # --- fixes 补丁（best-effort）---
-            for num in 0003 0004 0005; do
-              candidate="${CACHYOS_BASE}/${num}-fixes.patch"
-              if curl -sfL --head "$candidate" >/dev/null 2>&1; then
-                echo "下载 fixes: ${num}-fixes.patch"
-                curl -fL --retry 3 --retry-delay 2 "$candidate" -o "/tmp/${num}-fixes.patch"
-                if apply_patch_tolerant "/tmp/${num}-fixes.patch" "${num}-fixes.patch"; then
-                  FIXES_PATCH_NUM="${num}"
-                  FIXES_APPLIED=true
-                else
-                  git checkout -- . 2>/dev/null || true
-                  find . -name '*.rej' -delete 2>/dev/null || true
-                fi
-                break
-              fi
-            done
-
-            # --- BBRv3 补丁（多源回退）---
-            bbr_downloaded=false
-            bbr_sources=(
-              "${CACHYOS_BASE}/0002-bbr3.patch|CachyOS master"
-              "${CACHYOS_PINNED}/0002-bbr3.patch|CachyOS pinned (c1ba300)"
-            )
-
-            echo "检查 BBRv3 补丁..."
-            for entry in "${bbr_sources[@]}"; do
-              url="${entry%%|*}"
-              label="${entry##*|}"
-              echo "  尝试: ${label}"
-              if curl -sfL --head "$url" >/dev/null 2>&1; then
-                curl -fL --retry 3 --retry-delay 2 "$url" -o /tmp/0002-bbr3.patch
-                bbr_downloaded=true
-                BBR_SOURCE="${label}"
-                echo "  ✅ 下载成功"
-                break
-              else
-                echo "  ℹ️ 不可用"
-              fi
-            done
-
-            if $bbr_downloaded; then
-              echo "应用 BBRv3 补丁..."
-              if apply_patch_tolerant /tmp/0002-bbr3.patch "0002-bbr3.patch"; then
-                BBR_APPLIED=true
-              else
-                echo "::error::BBRv3 补丁无法应用到内核 ${kernel_series}"
-                exit 1
-              fi
-            else
-              echo "::error::BBRv3 补丁在所有来源均不可用"
-              echo "::error::  请在 patches/${kernel_series}/ 中添加对应版本的补丁"
-              exit 1
-            fi
-          fi
-
-
-          # ================================================================
-          # 最终验证：BBRv3 + 补丁状态汇总
-          # ================================================================
-          echo ""
-          echo "=== 最终验证 ==="
-
-          # BBRv3 必须可用
-          if ! $BBR_APPLIED; then
-            echo "::error::BBRv3 未能成功启用"
-            exit 1
-          fi
-
-          # 验证源码包含 BBR_VERSION 3
+          # 检测 BBRv3 特征
           if grep -qP 'BBR_VERSION\s+3' net/ipv4/tcp_bbr.c 2>/dev/null; then
-            echo "✅ 源码验证通过：BBR_VERSION = 3"
+            echo "✅ BBR_VERSION = 3 确认"
           else
-            echo "::warning::BBR 补丁已应用但未检测到 BBR_VERSION 3"
+            echo "::warning::未检测到 BBR_VERSION 3，BBRv3 可能未包含"
           fi
 
-          echo "✅ BBRv3 来源: ${BBR_SOURCE}"
-          if [ "$SKIPPED_HUNKS" -gt 0 ]; then
-            echo "::notice::共 ${SKIPPED_HUNKS} 个 hunk 因已上游合并而跳过"
+          if grep -q 'bbr_ecn_alpha' net/ipv4/tcp_bbr.c 2>/dev/null; then
+            echo "✅ bbr_ecn_alpha 存在"
           fi
 
-          # === 记录补丁信息（用于 Release 说明）===
+          if grep -q 'bbr_loss_thresh' net/ipv4/tcp_bbr.c 2>/dev/null; then
+            echo "✅ bbr_loss_thresh 存在"
+          fi
+
+          BBR_LINES=$(wc -l < net/ipv4/tcp_bbr.c)
+          echo "tcp_bbr.c: ${BBR_LINES} 行"
+
+          # 记录补丁信息（用于 Release 说明）
           {
             echo "PATCH_LINES<<PATCH_EOF"
-            echo "| BBRv3 | ${BBR_SOURCE} |"
-            if $FIXES_APPLIED && [ -n "${FIXES_PATCH_NUM}" ]; then
-              echo "| Fixes | ${FIXES_PATCH_NUM}-fixes.patch |"
-            fi
+            echo "| BBRv3 | XanMod 内置 (google/bbr v3) |"
             echo "PATCH_EOF"
           } >> $GITHUB_ENV
-
-          if $BASE_ALL_APPLIED || $FIXES_APPLIED; then
-            echo "CACHYOS_PATCHES_APPLIED=true" >> $GITHUB_ENV
-          else
-            echo "CACHYOS_PATCHES_APPLIED=false" >> $GITHUB_ENV
-          fi
+          echo "CACHYOS_PATCHES_APPLIED=false" >> $GITHUB_ENV
 
       - name: ✏️ 编译声明
         working-directory: ./kernel/linux
@@ -574,6 +348,14 @@ jobs:
           scripts/config --enable PAGE_POOL_STATS
           # 确保微码加载已启用（7.0 合并了 Intel/AMD 为统一 MICROCODE 选项）
           scripts/config --enable MICROCODE
+
+          # === BBRv3 拥塞控制（XanMod 已内置，确保设为默认）===
+          scripts/config --enable TCP_CONG_BBR
+          scripts/config --enable DEFAULT_BBR
+          scripts/config --set-str DEFAULT_TCP_CONG bbr
+          scripts/config --enable NET_SCH_FQ
+          scripts/config --enable DEFAULT_FQ
+          scripts/config --set-str DEFAULT_NET_SCH fq
 
           # === VPS 内存优化 ===
           # 默认启用 zswap 压缩交换缓存
@@ -795,13 +577,14 @@ jobs:
           | 内核压缩 | ZSTD |
           | 模块压缩 | ZSTD |
           | eBPF | BTF 已启用 (CO-RE) |
-          | 编译优化 | GCC 15 + ccache + VPS 精简配置 |
+          | 编译优化 | GCC 15 + ccache + XanMod + VPS 精简配置 |
 
           ### 🔧 VPS 优化
           - BPF JIT 始终开启、TCP-AO (RFC 5925)、MPTCP、XDP Sockets
           - PAGE_POOL_STATS、zswap(ZSTD+exclusive)、HALTPOLL_CPUIDLE
           - TEO CPU 空闲管理、sched_ext 外部调度器支持、RCU NOCB 优化
-          - 禁用 ~30 个不必要的硬件驱动（声卡、物理显卡、WiFi、蓝牙、InfiniBand 等）"
+          - 禁用 ~30 个不必要的硬件驱动（声卡、物理显卡、WiFi、蓝牙、InfiniBand 等）
+          - 基于 XanMod 内核 fork，BBRv3 由 Google 官方源码预集成"
 
             if [[ "${{ env.CACHYOS_PATCHES_APPLIED }}" == "true" ]]; then
               BODY="${BODY}
@@ -840,11 +623,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 删除当前 arch+series+branch 的所有旧缓存条目（排除本次即将保存的 key）
+          # 删除当前 arch+xanmod_branch 的所有旧缓存条目（排除本次即将保存的 key）
           # actions/cache 的 post-action 会在 job 结束时保存新条目
           # 避免旧条目堆积超出 GitHub Actions 10 GB 总缓存限额
-          PREFIX="ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-"
-          CURRENT_KEY="ccache-${{ matrix.arch }}-${{ env.KERNEL_SERIES }}-${{ matrix.branch }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          PREFIX="ccache-${{ matrix.arch }}-${{ matrix.xanmod_branch }}-"
+          CURRENT_KEY="ccache-${{ matrix.arch }}-${{ matrix.xanmod_branch }}-${{ github.run_id }}-${{ github.run_attempt }}"
           echo "清理缓存前缀: ${PREFIX}（保留: ${CURRENT_KEY}）"
           gh cache list --key "${PREFIX}" --json key -q '.[].key' | while read key; do
             if [ "${key}" = "${CURRENT_KEY}" ]; then
