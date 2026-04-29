@@ -304,16 +304,6 @@ jobs:
             echo "| BBRv3 | XanMod 内置 (google/bbr v3) |"
             echo "PATCH_EOF"
           } >> $GITHUB_ENV
-          echo "CACHYOS_PATCHES_APPLIED=false" >> $GITHUB_ENV
-
-      - name: ✏️ 编译声明
-        working-directory: ./kernel/linux
-        run: |
-          set -euo pipefail
-          sed -i '/^MODULE_DESCRIPTION(".*BBR.*"/d' net/ipv4/tcp_bbr.c
-          echo "MODULE_DESCRIPTION(\"TCP BBR v3 — Linux ${{ env.KERNEL_VERSION }} — Built by C000127\");" >> net/ipv4/tcp_bbr.c
-
-          tail -n 5 net/ipv4/tcp_bbr.c
 
       - name: 🔢 更新 Makefile 版本号
         working-directory: ./kernel/linux
@@ -492,7 +482,7 @@ jobs:
         env:
           # 固定构建元数据，避免时间戳差异导致 ccache 缓存失效
           KBUILD_BUILD_TIMESTAMP: ''
-          KBUILD_BUILD_USER: c000127
+          KBUILD_BUILD_USER: github
           KBUILD_BUILD_HOST: github
           # 使用 zstd 压缩 .deb 内部数据（压缩快、体积小）
           KDEB_COMPRESS: zstd
@@ -503,11 +493,9 @@ jobs:
           # -j$(nproc): 充分利用所有 CPU 核心
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ env.XANMOD_BRANCH }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           else
             make bindeb-pkg -j$(nproc) \
-              LOCALVERSION=-${{ env.XANMOD_BRANCH }}-c000127-bbrv3 \
               KCFLAGS="-pipe"
           fi
           BUILD_END=$(date +%s)
@@ -539,7 +527,7 @@ jobs:
 
       - name: 🧹 清理已有 Release 资源
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.XANMOD_BRANCH }}"
+          TAG="x86_64-${{ env.KERNEL_VERSION }}"
           RELEASE=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
@@ -557,26 +545,25 @@ jobs:
       - name: 🎉 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.XANMOD_BRANCH }}
+          tag_name: x86_64-${{ env.KERNEL_VERSION }}
           files: ./kernel/linux-*.deb
 
       - name: 🔄 更新 Release 说明
         run: |
-          TAG="${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ env.XANMOD_BRANCH }}"
+          TAG="x86_64-${{ env.KERNEL_VERSION }}"
           RELEASE_ID=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
             | jq -r '.id')
           if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
-            BODY="## 🚀 Linux ${{ env.KERNEL_VERSION }} (${{ env.XANMOD_BRANCH }}) with BBRv3 — ${{ matrix.arch }}
+            BODY="## 🚀 Linux ${{ env.KERNEL_VERSION }} with BBRv3 — x86_64
 
           | 项目 | 值 |
           |---|---|
           | 内核版本 | ${{ env.KERNEL_VERSION }} |
-          | 内核分支 | ${{ env.XANMOD_BRANCH }} |
           | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
-          | 架构 | ${{ matrix.arch }} |
+          | 架构 | x86_64 |
           ${{ env.PATCH_LINES }}
           | 拥塞控制 | BBRv3 (built-in) |
           | 默认 Qdisc | fq |
@@ -594,11 +581,6 @@ jobs:
           - TEO CPU 空闲管理、sched_ext 外部调度器支持、RCU NOCB 优化
           - 禁用 ~30 个不必要的硬件驱动（声卡、物理显卡、WiFi、蓝牙、InfiniBand 等）
           - 基于 XanMod 内核 fork，BBRv3 由 Google 官方源码预集成"
-
-            if [[ "${{ env.CACHYOS_PATCHES_APPLIED }}" == "true" ]]; then
-              BODY="${BODY}
-          - CachyOS 社区性能补丁（调度器/内存/驱动修复）"
-            fi
 
             BODY="${BODY}
 
