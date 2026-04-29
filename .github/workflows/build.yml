@@ -48,14 +48,24 @@ jobs:
 
           # 从 XanMod GitLab 获取最新 tag（所有分支中版本最高的）
           # tag 格式: 7.0.2-xanmod1 或 6.18.25-xanmod1
-          XANMOD_TAG=$(git -c 'versionsort.suffix=-rc' ls-remote \
-            --tags --refs --sort=-version:refname \
-            https://gitlab.com/xanmod/linux.git \
-            "*-xanmod*" \
-            2>/dev/null | head -1 | awk '{print $2}' | sed 's|refs/tags/||')
+          # GitLab 从 Actions 连接不稳定，加重试
+          XANMOD_TAG=""
+          for attempt in 1 2 3; do
+            echo "尝试 #${attempt} 获取 XanMod tag..."
+            XANMOD_TAG=$(git -c 'versionsort.suffix=-rc' ls-remote \
+              --tags --refs --sort=-version:refname \
+              https://gitlab.com/xanmod/linux.git \
+              "*-xanmod*" 2>/dev/null \
+              | head -1 | awk '{print $2}' | sed 's|refs/tags/||') || true
+            if [[ -n "$XANMOD_TAG" ]]; then
+              break
+            fi
+            echo "  失败，等待 5 秒后重试..."
+            sleep 5
+          done
 
           if [[ -z "$XANMOD_TAG" ]]; then
-            echo "::error::无法从 XanMod GitLab 获取最新 tag"
+            echo "::error::无法从 XanMod GitLab 获取最新 tag（3 次重试均失败）"
             exit 1
           fi
 
@@ -245,9 +255,23 @@ jobs:
           set -euo pipefail
           mkdir -p ./kernel
           echo "克隆 XanMod linux @ ${{ env.XANMOD_TAG }} ..."
-          git clone --depth=1 --single-branch --no-tags \
-            --branch "${{ env.XANMOD_TAG }}" \
-            https://gitlab.com/xanmod/linux.git ./kernel/linux
+          # GitLab 从 Actions 连接不稳定，加重试
+          for attempt in 1 2 3; do
+            echo "尝试 #${attempt} 克隆..."
+            rm -rf ./kernel/linux
+            if git clone --depth=1 --single-branch --no-tags \
+              --branch "${{ env.XANMOD_TAG }}" \
+              https://gitlab.com/xanmod/linux.git ./kernel/linux 2>&1; then
+              echo "✅ 克隆成功"
+              break
+            fi
+            echo "  失败，等待 10 秒后重试..."
+            sleep 10
+          done
+          if [[ ! -d ./kernel/linux/.git ]]; then
+            echo "::error::XanMod 内核克隆失败（3 次重试均失败）"
+            exit 1
+          fi
           echo "内核源码下载完成，目录大小: $(du -sh ./kernel/linux | cut -f1)"
 
       - name: ✅ 验证 BBRv3 内置
@@ -608,11 +632,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 如果 XANMOD_BRANCH 未设置，跳过清理
+          if [[ -z "${XANMOD_BRANCH:-}" ]]; then
+            echo "XANMOD_BRANCH 未设置，跳过缓存清理"
+            exit 0
+          fi
           # 删除当前 arch+xanmod_branch 的所有旧缓存条目（排除本次即将保存的 key）
           # actions/cache 的 post-action 会在 job 结束时保存新条目
           # 避免旧条目堆积超出 GitHub Actions 10 GB 总缓存限额
-          PREFIX="ccache-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}-"
-          CURRENT_KEY="ccache-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          PREFIX="ccache-${{ matrix.arch }}-${XANMOD_BRANCH}-"
+          CURRENT_KEY="ccache-${{ matrix.arch }}-${XANMOD_BRANCH}-${{ github.run_id }}-${{ github.run_attempt }}"
           echo "清理缓存前缀: ${PREFIX}（保留: ${CURRENT_KEY}）"
           gh cache list --key "${PREFIX}" --json key -q '.[].key' | while read key; do
             if [ "${key}" = "${CURRENT_KEY}" ]; then
