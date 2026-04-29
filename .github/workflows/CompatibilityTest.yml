@@ -84,8 +84,8 @@ jobs:
 
           echo "克隆 ${{ matrix.repo }} @ $REF ..."
           mkdir -p ./kernel
+          # 普通浅克隆（不用 --filter=blob:none，确保文件内容完整检出）
           git clone --depth=1 --single-branch --no-tags --branch "$REF" \
-            --filter=blob:none --sparse \
             "https://github.com/${{ matrix.repo }}.git" ./kernel/linux 2>&1 || {
             echo "RESULT_DOWNLOAD=❌ 克隆失败" >> $GITHUB_ENV
             echo "OVERALL=❌ 内核源码获取失败" >> $GITHUB_ENV
@@ -93,21 +93,19 @@ jobs:
           }
 
           cd ./kernel/linux
-          # 稀疏检出：只获取编译 tcp_bbr.c 所需的最小文件集
-          git sparse-checkout set \
-            net/ipv4 \
-            include \
-            arch/x86/include \
-            arch/arm64/include \
-            tools \
-            scripts \
-            Makefile \
-            Kconfig 2>/dev/null || true
-          git checkout 2>/dev/null || true
+
+          # 验证关键文件存在
+          if [[ ! -f net/ipv4/tcp_bbr.c ]]; then
+            echo "RESULT_DOWNLOAD=❌ 克隆成功但 tcp_bbr.c 不存在" >> $GITHUB_ENV
+            echo "OVERALL=❌ 关键源文件缺失" >> $GITHUB_ENV
+            exit 0
+          fi
 
           SIZE=$(du -sh . 2>/dev/null | cut -f1)
+          BBR_LINES=$(wc -l < net/ipv4/tcp_bbr.c)
           echo "内核源码下载完成: $SIZE"
-          echo "RESULT_DOWNLOAD=✅ 下载成功 ($SIZE)" >> $GITHUB_ENV
+          echo "tcp_bbr.c: ${BBR_LINES} 行"
+          echo "RESULT_DOWNLOAD=✅ 下载成功 ($SIZE, tcp_bbr.c: ${BBR_LINES}行)" >> $GITHUB_ENV
 
       - name: 📥 下载 Google BBRv3 源码
         id: download_bbr
@@ -192,8 +190,12 @@ jobs:
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
-          if [[ ! -f net/ipv4/tcp_bbr.c || ! -f /tmp/tcp_bbr_v3.c ]]; then
-            echo "RESULT_COMPILE=⏭️ 源文件不存在，跳过编译测试" >> $GITHUB_ENV
+          if [[ ! -f net/ipv4/tcp_bbr.c ]]; then
+            echo "RESULT_COMPILE=❌ 内核 tcp_bbr.c 不存在" >> $GITHUB_ENV
+            exit 0
+          fi
+          if [[ ! -f /tmp/tcp_bbr_v3.c ]]; then
+            echo "RESULT_COMPILE=❌ BBRv3 tcp_bbr.c 不存在" >> $GITHUB_ENV
             exit 0
           fi
 
@@ -201,19 +203,19 @@ jobs:
           cp net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c.bbrv1
           cp /tmp/tcp_bbr_v3.c net/ipv4/tcp_bbr.c
 
-          # 生成最小 .config（只需要网络子系统）
-          echo "准备内核配置..."
-          make defconfig 2>/dev/null || true
-          scripts/config --enable TCP_CONG_BBR
-          scripts/config --enable DEFAULT_TCP_CONG_BBR
-          scripts/config --enable NET_SCH_FQ
-          scripts/config --enable DEFAULT_NET_SCH_FQ
-          make olddefconfig 2>/dev/null || true
-
           # 安装编译依赖
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             gcc make flex bison bc libssl-dev libelf-dev 2>/dev/null || true
+
+          # 生成最小 .config（只需要网络子系统）
+          echo "准备内核配置..."
+          make defconfig 2>&1 | tail -3
+          scripts/config --enable TCP_CONG_BBR
+          scripts/config --enable DEFAULT_TCP_CONG_BBR
+          scripts/config --enable NET_SCH_FQ
+          scripts/config --enable DEFAULT_NET_SCH_FQ
+          make olddefconfig 2>&1 | tail -3
 
           # 尝试只编译 tcp_bbr.c（不编译整个内核，节省时间）
           echo ""
