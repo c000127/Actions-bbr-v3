@@ -1,36 +1,415 @@
-# This is a basic workflow to help you get started with Actions
+name: BBRv3 兼容性测试
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+  # 每周一自动测试（及时发现内核 API 变化）
+  schedule:
+    - cron: '0 8 * * 1'
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions:
+  contents: read
+
+env:
+  GOOGLE_BBR_URL: "https://raw.githubusercontent.com/google/bbr/v3/net/ipv4/tcp_bbr.c"
+
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  # ============================================================
+  # Job 1: 获取最新内核版本号
+  # ============================================================
+  get-versions:
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    outputs:
+      mainline_version: ${{ steps.versions.outputs.mainline_version }}
+      stable_version: ${{ steps.versions.outputs.stable_version }}
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: 📋 获取最新内核版本
+        id: versions
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          set -euo pipefail
+
+          # mainline
+          mainline=$(curl -sL --retry 3 https://www.kernel.org \
+            | grep -A1 -m1 "mainline:" \
+            | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?') || true
+          # stable
+          stable=$(curl -sL --retry 3 https://www.kernel.org \
+            | grep -A1 -m1 "stable:" \
+            | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?') || true
+
+          echo "mainline: ${mainline:-获取失败}"
+          echo "stable: ${stable:-获取失败}"
+
+          if [[ -z "$mainline" || -z "$stable" ]]; then
+            echo "::error::无法从 kernel.org 获取版本号"
+            exit 1
+          fi
+
+          echo "mainline_version=$mainline" >> $GITHUB_OUTPUT
+          echo "stable_version=$stable" >> $GITHUB_OUTPUT
+
+  # ============================================================
+  # Job 2: 兼容性测试（mainline + stable 并行）
+  # ============================================================
+  test:
+    needs: get-versions
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch: mainline
+            version: ${{ needs.get-versions.outputs.mainline_version }}
+            repo: torvalds/linux
+            ref_prefix: v
+          - branch: stable
+            version: ${{ needs.get-versions.outputs.stable_version }}
+            repo: gregkh/linux
+            ref_prefix: linux-
+    runs-on: ubuntu-latest
+    env:
+      # 测试结果汇总
+      RESULT_DOWNLOAD: "⏭️ 跳过"
+      RESULT_REPLACE: "⏭️ 跳过"
+      RESULT_COMPILE: "⏭️ 跳过"
+      RESULT_API_CHECK: "⏭️ 跳过"
+      OVERALL: "❌ 未知"
+      ISSUES: ""
+
+    steps:
+      - name: 📥 下载内核源码（最小化）
+        id: download_kernel
+        run: |
+          set -euo pipefail
+          echo "分支: ${{ matrix.branch }} | 版本: ${{ matrix.version }}"
+
+          if [[ "${{ matrix.branch }}" == "mainline" ]]; then
+            REF="v${{ matrix.version }}"
+          else
+            SERIES=$(echo "${{ matrix.version }}" | grep -oP '^\d+\.\d+')
+            REF="linux-${SERIES}.y"
+          fi
+
+          echo "克隆 ${{ matrix.repo }} @ $REF ..."
+          mkdir -p ./kernel
+          git clone --depth=1 --single-branch --no-tags --branch "$REF" \
+            --filter=blob:none --sparse \
+            "https://github.com/${{ matrix.repo }}.git" ./kernel/linux 2>&1 || {
+            echo "RESULT_DOWNLOAD=❌ 克隆失败" >> $GITHUB_ENV
+            echo "OVERALL=❌ 内核源码获取失败" >> $GITHUB_ENV
+            exit 0
+          }
+
+          cd ./kernel/linux
+          # 稀疏检出：只获取编译 tcp_bbr.c 所需的最小文件集
+          git sparse-checkout set \
+            net/ipv4 \
+            include \
+            arch/x86/include \
+            arch/arm64/include \
+            tools \
+            scripts \
+            Makefile \
+            Kconfig 2>/dev/null || true
+          git checkout 2>/dev/null || true
+
+          SIZE=$(du -sh . 2>/dev/null | cut -f1)
+          echo "内核源码下载完成: $SIZE"
+          echo "RESULT_DOWNLOAD=✅ 下载成功 ($SIZE)" >> $GITHUB_ENV
+
+      - name: 📥 下载 Google BBRv3 源码
+        id: download_bbr
+        run: |
+          set -euo pipefail
+          echo "下载 Google BBRv3 tcp_bbr.c ..."
+          if curl -fL --retry 3 --retry-delay 2 "${{ env.GOOGLE_BBR_URL }}" -o /tmp/tcp_bbr_v3.c; then
+            LINES=$(wc -l < /tmp/tcp_bbr_v3.c)
+            SIZE=$(du -h /tmp/tcp_bbr_v3.c | cut -f1)
+            echo "下载成功: ${LINES} 行, ${SIZE}"
+
+            # 验证 BBRv3 特征
+            HAS_VERSION=$(grep -cP 'BBR_VERSION\s+3' /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
+            HAS_ECN=$(grep -c 'bbr_ecn_alpha' /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
+            HAS_LOSS=$(grep -c 'bbr_loss_thresh' /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
+
+            echo "BBRv3 特征检测:"
+            echo "  BBR_VERSION 3: $HAS_VERSION 处"
+            echo "  bbr_ecn_alpha: $HAS_ECN 处"
+            echo "  bbr_loss_thresh: $HAS_LOSS 处"
+
+            if [[ "$HAS_ECN" -gt 0 || "$HAS_LOSS" -gt 0 ]]; then
+              echo "RESULT_DOWNLOAD=✅ 下载成功 (${LINES}行, BBRv3 特征已确认)" >> $GITHUB_ENV
+            else
+              echo "RESULT_DOWNLOAD=⚠️ 下载成功但未检测到 BBRv3 特征" >> $GITHUB_ENV
+            fi
+          else
+            echo "RESULT_DOWNLOAD=❌ Google BBRv3 源码下载失败" >> $GITHUB_ENV
+            echo "OVERALL=❌ BBRv3 源码获取失败" >> $GITHUB_ENV
+            exit 0
+          fi
+
+      - name: 🔍 源码差异分析
+        id: diff_analysis
+        working-directory: ./kernel/linux
+        run: |
+          set -euo pipefail
+          if [[ ! -f net/ipv4/tcp_bbr.c ]]; then
+            echo "RESULT_REPLACE=⚠️ 内核 tcp_bbr.c 不存在，跳过差异分析" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "=== BBRv1 vs BBRv3 差异分析 ==="
+          ORIG_LINES=$(wc -l < net/ipv4/tcp_bbr.c)
+          V3_LINES=$(wc -l < /tmp/tcp_bbr_v3.c)
+          echo "BBRv1 (内核原版): ${ORIG_LINES} 行"
+          echo "BBRv3 (Google):   ${V3_LINES} 行"
+          echo "行数变化: $((V3_LINES - ORIG_LINES)) 行"
+
+          # 统计差异
+          DIFF_STATS=$(diff --stat net/ipv4/tcp_bbr.c /tmp/tcp_bbr_v3.c 2>/dev/null | tail -1 || echo "无法生成差异统计")
+          echo "差异统计: $DIFF_STATS"
+
+          # 检查 BBRv3 新增的关键符号
+          echo ""
+          echo "=== BBRv3 新增关键符号 ==="
+          for sym in bbr_ecn_alpha bbr_loss_thresh bbr_ecn_max_rtt_us bbr_bw_rtts \
+                     bbr_ecnece_ecn_ce bbr_target_inflight bbr_sndbuf_expand \
+                     BBR_VERSION; do
+            count=$(grep -c "$sym" /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
+            if [[ "$count" -gt 0 ]]; then
+              echo "  ✅ $sym ($count 处)"
+            fi
+          done
+
+          # 检查 BBRv1 有但 BBRv3 可能删除的符号
+          echo ""
+          echo "=== BBRv1 独有符号（BBRv3 中可能已移除）==="
+          for sym in bbr_lt_bw_sampling bbr_lt_intvl_min_rtts bbr_lt_loss_thresh \
+                     lt_is_sampling lt_bw lt_use_bw; do
+            v1_count=$(grep -c "$sym" net/ipv4/tcp_bbr.c 2>/dev/null || echo 0)
+            v3_count=$(grep -c "$sym" /tmp/tcp_bbr_v3.c 2>/dev/null || echo 0)
+            if [[ "$v1_count" -gt 0 && "$v3_count" -eq 0 ]]; then
+              echo "  ⚠️ $sym (v1: $v1_count → v3: 已移除)"
+            fi
+          done
+
+          echo "RESULT_REPLACE=✅ 差异分析完成 (v1: ${ORIG_LINES}行 → v3: ${V3_LINES}行)" >> $GITHUB_ENV
+
+      - name: 🔧 替换源码并尝试编译
+        id: compile_test
+        working-directory: ./kernel/linux
+        run: |
+          set -euo pipefail
+          if [[ ! -f net/ipv4/tcp_bbr.c || ! -f /tmp/tcp_bbr_v3.c ]]; then
+            echo "RESULT_COMPILE=⏭️ 源文件不存在，跳过编译测试" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # 备份并替换
+          cp net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c.bbrv1
+          cp /tmp/tcp_bbr_v3.c net/ipv4/tcp_bbr.c
+
+          # 生成最小 .config（只需要网络子系统）
+          echo "准备内核配置..."
+          make defconfig 2>/dev/null || true
+          scripts/config --enable TCP_CONG_BBR
+          scripts/config --enable DEFAULT_TCP_CONG_BBR
+          scripts/config --enable NET_SCH_FQ
+          scripts/config --enable DEFAULT_NET_SCH_FQ
+          make olddefconfig 2>/dev/null || true
+
+          # 安装编译依赖
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc make flex bison bc libssl-dev libelf-dev 2>/dev/null || true
+
+          # 尝试只编译 tcp_bbr.c（不编译整个内核，节省时间）
+          echo ""
+          echo "=== 尝试编译 net/ipv4/tcp_bbr.c ==="
+          COMPILE_LOG="/tmp/compile_bbr.log"
+          if make net/ipv4/tcp_bbr.o -j$(nproc) 2>&1 | tee "$COMPILE_LOG"; then
+            echo ""
+            echo "✅ 编译成功！"
+            echo "RESULT_COMPILE=✅ tcp_bbr.o 编译成功" >> $GITHUB_ENV
+          else
+            echo ""
+            echo "❌ 编译失败"
+            echo "RESULT_COMPILE=❌ tcp_bbr.o 编译失败" >> $GITHUB_ENV
+
+            # 提取错误信息
+            ERRORS=$(grep -E 'error:|undefined|undeclared|incompatible' "$COMPILE_LOG" | head -20 || true)
+            if [[ -n "$ERRORS" ]]; then
+              echo ""
+              echo "=== 编译错误摘要 ==="
+              echo "$ERRORS"
+              # 保存错误到环境变量（截断避免超长）
+              ERR_SUMMARY=$(echo "$ERRORS" | head -5 | tr '\n' ' | ' | cut -c1-500)
+              echo "ISSUES=$ERR_SUMMARY" >> $GITHUB_ENV
+            fi
+          fi
+
+      - name: 🔬 API 兼容性检查
+        id: api_check
+        working-directory: ./kernel/linux
+        run: |
+          set -euo pipefail
+          if [[ ! -f net/ipv4/tcp_bbr.c ]]; then
+            echo "RESULT_API_CHECK=⏭️ 源文件不存在，跳过" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          echo "=== API 兼容性静态分析 ==="
+          ISSUES_FOUND=0
+          ISSUE_LIST=""
+
+          # 1. 检查 BBRv3 使用的内核 API 是否在当前内核中存在
+          echo ""
+          echo "--- 检查 BBRv3 依赖的内核符号 ---"
+
+          # 从 BBRv3 源码中提取调用的内核函数
+          V3_FUNCS=$(grep -oP '\b(tcp_|inet_csk_|tcp_snd_cwnd|tcp_snd_cwnd_set|WRITE_ONCE|READ_ONCE|minmax_|bbr_)\w+' \
+            net/ipv4/tcp_bbr.c 2>/dev/null | sort -u || true)
+
+          MISSING_SYMS=""
+          for func in $V3_FUNCS; do
+            # 在内核头文件中搜索符号定义
+            if ! grep -rq "$func" include/net/tcp.h include/linux/*.h net/ipv4/tcp*.c 2>/dev/null; then
+              MISSING_SYMS="$MISSING_SYMS $func"
+            fi
+          done
+
+          if [[ -n "$MISSING_SYMS" ]]; then
+            echo "⚠️ 以下符号在内核头文件中未找到定义:"
+            for sym in $MISSING_SYMS; do
+              echo "  - $sym"
+            done
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            ISSUE_LIST="缺失符号:$(echo $MISSING_SYMS | tr ' ' ',')"
+          else
+            echo "✅ 所有依赖的内核符号均已找到"
+          fi
+
+          # 2. 检查 struct bbr 是否超出 ICSK_CA_PRIV_SIZE
+          echo ""
+          echo "--- 检查 struct bbr 大小 ---"
+          if grep -q 'BUILD_BUG_ON(sizeof(struct bbr)' net/ipv4/tcp_bbr.c; then
+            echo "✅ BBRv3 包含 BUILD_BUG_ON 大小检查（编译时自动验证）"
+          else
+            echo "⚠️ BBRv3 未包含 BUILD_BUG_ON 大小检查"
+          fi
+
+          # 3. 检查 BTF kfunc 兼容性
+          echo ""
+          echo "--- 检查 BTF kfunc 兼容性 ---"
+          if grep -q 'BTF_KFUNCS_START' net/ipv4/tcp_bbr.c; then
+            echo "BBRv3 使用 BTF kfunc 注册"
+            # 检查 kfunc 是否在内核中定义
+            KFUNCS=$(grep -oP 'BTF_ID_FLAGS\(func,\s*\K\w+' net/ipv4/tcp_bbr.c 2>/dev/null || true)
+            for kf in $KFUNCS; do
+              if grep -rq "$kf" include/net/tcp.h net/ipv4/tcp*.c 2>/dev/null; then
+                echo "  ✅ $kf"
+              else
+                echo "  ⚠️ $kf (未在内核中找到定义)"
+                ISSUES_FOUND=$((ISSUES_FOUND + 1))
+              fi
+            done
+          fi
+
+          # 4. 检查 cong_control 回调签名
+          echo ""
+          echo "--- 检查 tcp_congestion_ops 结构兼容性 ---"
+          if grep -q 'cong_control' include/net/tcp.h 2>/dev/null; then
+            echo "✅ tcp_congestion_ops.cong_control 存在"
+          else
+            echo "⚠️ tcp_congestion_ops.cong_control 未找到"
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            ISSUE_LIST="$ISSUE_LIST cong_control回调缺失"
+          fi
+
+          # 汇总
+          echo ""
+          if [[ $ISSUES_FOUND -eq 0 ]]; then
+            echo "RESULT_API_CHECK=✅ API 兼容性检查通过" >> $GITHUB_ENV
+          else
+            echo "RESULT_API_CHECK=⚠️ 发现 $ISSUES_FOUND 个潜在兼容性问题" >> $GITHUB_ENV
+            if [[ -z "$ISSUES" ]]; then
+              echo "ISSUES=$ISSUE_LIST" >> $GITHUB_ENV
+            fi
+          fi
+
+      - name: 📊 生成测试报告
+        if: always()
+        run: |
+          set -euo pipefail
+
+          # 判断总体结果
+          if echo "${{ env.RESULT_COMPILE }}" | grep -q '✅'; then
+            OVERALL="✅ 完全兼容"
+          elif echo "${{ env.RESULT_COMPILE }}" | grep -q '❌'; then
+            OVERALL="❌ 编译失败"
+          elif echo "${{ env.RESULT_API_CHECK }}" | grep -q '⚠️'; then
+            OVERALL="⚠️ 存在兼容性问题"
+          elif echo "${{ env.RESULT_DOWNLOAD }}" | grep -q '❌'; then
+            OVERALL="❌ 源码获取失败"
+          else
+            OVERALL="⚠️ 测试未完成"
+          fi
+          echo "OVERALL=$OVERALL" >> $GITHUB_ENV
+
+          # 写入 GITHUB_STEP_SUMMARY
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          ## ${{ matrix.branch }} 分支 (${{ matrix.version }})
+
+          | 测试项 | 结果 |
+          |--------|------|
+          | 源码下载 | ${{ env.RESULT_DOWNLOAD }} |
+          | 替换 & 差异分析 | ${{ env.RESULT_REPLACE }} |
+          | 编译测试 (tcp_bbr.o) | ${{ env.RESULT_COMPILE }} |
+          | API 兼容性检查 | ${{ env.RESULT_API_CHECK }} |
+          | **总体结果** | **${OVERALL}** |
+          EOF
+
+          # 如果有问题，输出详情
+          if [[ -n "${{ env.ISSUES }}" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### ⚠️ 问题详情" >> $GITHUB_STEP_SUMMARY
+            echo '${{ env.ISSUES }}' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo ""
+          echo "========================================="
+          echo "  ${{ matrix.branch }} (${{ matrix.version }}): $OVERALL"
+          echo "========================================="
+
+      - name: 📤 上传编译日志
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compile-log-${{ matrix.branch }}
+          path: /tmp/compile_bbr.log
+          retention-days: 7
+
+  # ============================================================
+  # Job 3: 汇总报告
+  # ============================================================
+  summary:
+    needs: [get-versions, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📊 生成汇总报告
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 🔬 BBRv3 兼容性测试报告
+
+          | 分支 | 内核版本 | 测试结果 |
+          |------|----------|----------|
+          | mainline | ${{ needs.get-versions.outputs.mainline_version }} | 查看上方 mainline job |
+          | stable | ${{ needs.get-versions.outputs.stable_version }} | 查看上方 stable job |
+
+          > 📅 测试时间: $(date -u '+%Y-%m-%d %H:%M UTC')
+          > 🔗 BBRv3 来源: [google/bbr v3](https://github.com/google/bbr/tree/v3)
+
+          ### 说明
+          - **✅ 完全兼容**: Google BBRv3 源码可直接替换内核 tcp_bbr.c 并编译通过
+          - **⚠️ 存在兼容性问题**: API 有变化，需要适配后才能使用
+          - **❌ 编译失败**: 内核 API 变化较大，需要更新 BBRv3 源码
+          EOF
