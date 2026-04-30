@@ -1,4 +1,4 @@
-name: 构建 VPS 优化的 BBRv3 内核
+name: 构建 VPS 优化的 BBRv3 内核（XanMod）
 
 on:
   workflow_dispatch:
@@ -562,10 +562,11 @@ jobs:
           | 项目 | 值 |
           |---|---|
           | 内核版本 | ${{ env.KERNEL_VERSION }} |
+          | 内核源码 | XanMod (${{ env.XANMOD_TAG }}) |
           | 构建时间 | ${{ env.BUILD_TIMESTAMP }} UTC |
           | 架构 | x86_64 |
           ${{ env.PATCH_LINES }}
-          | 拥塞控制 | BBRv3 (built-in) |
+          | 拥塞控制 | BBRv3 (built-in, default) |
           | 默认 Qdisc | fq |
           | 定时器 | NO_HZ_IDLE |
           | 抢占模型 | PREEMPT_LAZY |
@@ -573,7 +574,7 @@ jobs:
           | 内核压缩 | ZSTD |
           | 模块压缩 | ZSTD |
           | eBPF | BTF 已启用 (CO-RE) |
-          | 编译优化 | GCC 15 + ccache + XanMod + VPS 精简配置 |
+          | 编译优化 | GCC 15 + ccache + VPS 精简配置 |
 
           ### 🔧 VPS 优化
           - BPF JIT 始终开启、TCP-AO (RFC 5925)、MPTCP、XDP Sockets

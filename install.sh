@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # BBR v3 管理脚本 — c000127 fork
-# 原始项目：https://github.com/byJoey/Actions-bbr-v3
+# 基于 XanMod 内核 fork，BBRv3 由 Google 官方源码预集成
 #
 # 相较上游的主要改进：
 #   - set -uo pipefail + root 权限检查
@@ -84,16 +84,16 @@ if [[ "$ARCH" != "aarch64" && "$ARCH" != "x86_64" ]]; then
 fi
 
 # 内核品牌标识（用于匹配已安装的内核包）
-KERNEL_BRAND="c000127-bbrv3"
+KERNEL_BRAND="bbrv3"
 
 # sysctl 配置文件路径
 SYSCTL_CONF="/etc/sysctl.d/99-${KERNEL_BRAND}.conf"
 # 模块自动加载配置文件路径
 MODULES_CONF="/etc/modules-load.d/${KERNEL_BRAND}-qdisc.conf"
 
-# 迁移旧版配置文件（从 c000127 → c000127-bbrv3）
-OLD_SYSCTL_CONF="/etc/sysctl.d/99-c000127.conf"
-OLD_MODULES_CONF="/etc/modules-load.d/c000127-qdisc.conf"
+# 迁移旧版配置文件（从 c000127-bbrv3 → bbrv3）
+OLD_SYSCTL_CONF="/etc/sysctl.d/99-c000127-bbrv3.conf"
+OLD_MODULES_CONF="/etc/modules-load.d/c000127-bbrv3-qdisc.conf"
 if [[ -f "$OLD_SYSCTL_CONF" && "$OLD_SYSCTL_CONF" != "$SYSCTL_CONF" ]]; then
     sudo mv "$OLD_SYSCTL_CONF" "$SYSCTL_CONF" 2>/dev/null
 fi
@@ -338,13 +338,13 @@ sort_kernel_tags_desc() {
     done <<< "$tags" | sort -r | cut -f2
 }
 
-# 函数：获取已安装的内核版本（去除品牌后缀，返回版本号+分支）
+# 函数：获取已安装的内核版本（返回版本号）
 get_installed_version() {
     local pkg
     pkg=$(dpkg -l | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | head -n 1)
     if [[ -n "$pkg" ]]; then
-        # linux-image-7.0.0-rc1-mainline-c000127-bbrv3 → 7.0.0-rc1-mainline
-        echo "$pkg" | sed "s/linux-image-//;s/-${KERNEL_BRAND}//"
+        # linux-image-7.0.2-xanmod1-bbrv3 → 7.0.2
+        echo "$pkg" | sed "s/linux-image-//;s/-xanmod[0-9]*.*//;s/-${KERNEL_BRAND}//"
     fi
 }
 
@@ -354,118 +354,29 @@ get_installed_branch() {
     ver=$(get_installed_version)
     if [[ -z "$ver" ]]; then
         echo ""
-    elif [[ "$ver" == *"-beta"* ]]; then
-        # beta 判断必须在 mainline/stable 之前，因为 beta tag 包含 mainline 字样
-        echo "beta"
-    elif [[ "$ver" == *"-mainline"* ]]; then
-        echo "mainline"
-    elif [[ "$ver" == *"-stable"* ]]; then
-        echo "stable"
     else
-        echo "unknown"
+        echo "xanmod"
     fi
 }
 
 # 函数：选择内核分支（结果保存在 SELECTED_BRANCH 变量中）
 select_branch() {
-    echo ""
-    echo -e "\033[1;33m  ╔══════════════════════════════════════════════════════╗\033[0m"
-    echo -e "\033[1;33m  ║              📦 选择内核分支                         ║\033[0m"
-    echo -e "\033[1;33m  ╚══════════════════════════════════════════════════════╝\033[0m"
-    echo -e "\033[2;36m  所有分支共享：CachyOS 补丁 · BBRv3 · BTF/eBPF · sched_ext\033[0m"
-    echo -e "\033[2;36m  VPS 精简驱动 · ZSTD 压缩 · MPTCP · zswap · GCC 15\033[0m"
-    echo ""
-    echo -e "\033[32m  ┌─\033[1;32m 🟢 1. Mainline（主线）\033[0m"
-    echo -e "\033[32m  │\033[0m    \033[36m源码：Torvalds 主仓库 · 最新内核特性\033[0m"
-    echo -e "\033[32m  │\033[0m    \033[36m配置：HZ=250 · x86-64 通用 · 含 32 位兼容\033[0m"
-    echo -e "\033[32m  └\033[0m    \033[36m周期：每 9-10 周大版本 · 追新用户首选\033[0m"
-    echo ""
-    echo -e "\033[34m  ┌─\033[1;34m 🔵 2. Stable（稳定）\033[0m"
-    echo -e "\033[34m  │\033[0m    \033[36m源码：Greg KH 稳定分支 · Bug 修复回移\033[0m"
-    echo -e "\033[34m  │\033[0m    \033[36m配置：HZ=250 · x86-64 通用 · 含 32 位兼容\033[0m"
-    echo -e "\033[34m  └\033[0m    \033[36m周期：每周发布 · 生产环境推荐\033[0m"
-    echo ""
-    echo -e "\033[31m  ┌─\033[1;31m 🔴 3. Beta（测试 - 激进优化）\033[0m"
-    echo -e "\033[31m  │\033[0m    \033[36m基于 Mainline + 激进编译优化\033[0m"
-    echo -e "\033[31m  │\033[0m    \033[36mx86-64-v3 指令集（需 Haswell+/Zen+ CPU）\033[0m"
-    echo -e "\033[31m  │\033[0m    \033[36mHZ=1000 低延迟 · NR_CPUS=256 精简\033[0m"
-    echo -e "\033[31m  │\033[0m    \033[36m纯 64 位（禁用 IA-32 兼容） · RCU Lazy\033[0m"
-    echo -e "\033[31m  └\033[0m    \033[33m⚠️ 仅限 x86_64 · 建议测试环境使用\033[0m"
-    echo ""
-    echo -e "\033[33m  0. 返回上一级\033[0m"
-    echo ""
-    while true; do
-        echo -n -e "\033[36m请选择 (0-3): \033[0m"
-        read -r branch_choice
-        case "$branch_choice" in
-            1) SELECTED_BRANCH="mainline"; return 0 ;;
-            2) SELECTED_BRANCH="stable"; return 0 ;;
-            3) SELECTED_BRANCH="beta"; return 0 ;;
-            0)
-                SELECTED_BRANCH=""
-                return 1
-                ;;
-            *)
-                echo -e "\033[31m无效输入，请重新选择\033[0m"
-                ;;
-        esac
-    done
+    SELECTED_BRANCH="xanmod"
+    return 0
 }
 
-# 函数：智能分支选择（已安装则默认更新同分支，切换需二次确认）
+# 函数：智能更新（已安装则提示更新，未安装则直接安装）
 smart_select_branch() {
-    local INSTALLED_BRANCH
-    INSTALLED_BRANCH=$(get_installed_branch)
+    local INSTALLED_VERSION
+    INSTALLED_VERSION=$(get_installed_version)
 
-    if [[ -n "$INSTALLED_BRANCH" && "$INSTALLED_BRANCH" != "unknown" ]]; then
-        local BRANCH_DISPLAY
-        case "$INSTALLED_BRANCH" in
-            mainline) BRANCH_DISPLAY="Mainline（主线）" ;;
-            stable) BRANCH_DISPLAY="Stable（稳定）" ;;
-            beta) BRANCH_DISPLAY="Beta（测试 - 激进优化）" ;;
-            *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
-        esac
+    if [[ -n "$INSTALLED_VERSION" ]]; then
         echo ""
         echo -e "\033[34m  ┌─\033[1;34m 📦 已安装内核\033[0m"
-        echo -e "\033[34m  └\033[0m    \033[36m当前分支：\033[0m\033[1;32m${BRANCH_DISPLAY}\033[0m"
-        echo ""
-        echo -e "\033[33m  1.\033[0m \033[36m更新当前分支 (${BRANCH_DISPLAY}) 到最新版\033[0m"
-        echo -e "\033[33m  2.\033[0m \033[36m切换到其他分支\033[0m"
-        echo -e "\033[33m  0.\033[0m \033[36m返回主菜单\033[0m"
-        while true; do
-            echo -n -e "\033[36m请选择 (0-2，默认 1): \033[0m"
-            read -r update_choice
-            case "${update_choice:-1}" in
-                1)
-                    SELECTED_BRANCH="$INSTALLED_BRANCH"
-                    return 0
-                    ;;
-                2)
-                    select_branch || return 1
-                    if [[ "$SELECTED_BRANCH" != "$INSTALLED_BRANCH" ]]; then
-                        echo ""
-                        echo -e "\033[31m⚠️ 您正在从 ${BRANCH_DISPLAY} 切换到 ${SELECTED_BRANCH} 分支\033[0m"
-                        echo -e "\033[33m   切换分支会卸载当前内核，安装新分支的内核。\033[0m"
-                        echo -n -e "\033[36m确认切换？(y/n): \033[0m"
-                        read -r confirm
-                        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-                            echo -e "\033[33m已取消操作。\033[0m"
-                            return 1
-                        fi
-                    fi
-                    return 0
-                    ;;
-                0)
-                    return 1
-                    ;;
-                *)
-                    echo -e "\033[31m无效输入，请重新选择\033[0m"
-                    ;;
-            esac
-        done
-    else
-        select_branch || return 1
+        echo -e "\033[34m  └\033[0m    \033[36m当前版本：\033[0m\033[1;32m${INSTALLED_VERSION}\033[0m"
     fi
+    SELECTED_BRANCH="xanmod"
+    return 0
 }
 
 # 函数：智能更新引导加载程序
@@ -542,7 +453,7 @@ install_packages() {
 install_latest_version() {
     smart_select_branch || return 1
 
-    echo -e "\033[36m正在从 GitHub 获取 ${SELECTED_BRANCH} 分支最新版本信息...\033[0m"
+    echo -e "\033[36m正在从 GitHub 获取最新版本信息...\033[0m"
     BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
     RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
     if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
@@ -554,19 +465,9 @@ install_latest_version() {
     [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
     [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
 
-    # 构建 tag 匹配正则：
-    #   mainline: 包含 "mainline" 且不包含 "beta"
-    #   stable:   包含 "stable" 且不包含 "beta"
-    #   beta:     包含 "beta"
-    local TAG_REGEX
-    if [[ "$SELECTED_BRANCH" == "beta" ]]; then
-        TAG_REGEX="beta"
-    else
-        TAG_REGEX="${SELECTED_BRANCH}(?!.*beta)"
-    fi
-
-    MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$TAG_REGEX" \
-        '.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch)) | .tag_name')
+    # tag 格式: x86_64-7.0.2（无分支后缀）
+    MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" \
+        '.[] | select(.tag_name | startswith($filter)) | .tag_name')
 
     if [[ -n "$MATCH_TAGS" ]]; then
         MATCH_TAGS=$(sort_kernel_tags_desc "$SELECTED_BRANCH" "$MATCH_TAGS")
@@ -612,10 +513,10 @@ install_latest_version() {
     install_packages
 }
 
-# 函数：手动选择分支和版本安装（先选分支，再选版本，最后确认）
+# 函数：手动选择版本安装
 install_specific_version() {
     while true; do
-        select_branch || return 0
+        SELECTED_BRANCH="xanmod"
 
         BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
         RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
@@ -627,17 +528,10 @@ install_specific_version() {
         local ARCH_FILTER=""
         [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
         [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
-        
-        # 构建 tag 匹配正则（与 install_latest_version 相同逻辑）
-        local TAG_REGEX
-        if [[ "$SELECTED_BRANCH" == "beta" ]]; then
-            TAG_REGEX="beta"
-        else
-            TAG_REGEX="${SELECTED_BRANCH}(?!.*beta)"
-        fi
 
-        MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" --arg branch "$TAG_REGEX" \
-            '.[] | select(.tag_name | test($filter; "i")) | select(.tag_name | test($branch)) | .tag_name')
+        # tag 格式: x86_64-7.0.2（无分支后缀）
+        MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" \
+            '.[] | select(.tag_name | startswith($filter)) | .tag_name')
 
         if [[ -z "$MATCH_TAGS" ]]; then
             echo -e "\033[31m未找到适合当前架构的 ${SELECTED_BRANCH} 分支版本。\033[0m"
@@ -678,28 +572,6 @@ install_specific_version() {
         SELECTED_TAG="${TAG_ARRAY[$INDEX]}"
         local selected_ver="${SELECTED_TAG#${ARCH_FILTER}-}"
         echo -e "\033[36m已选择版本：\033[0m\033[1;32m$selected_ver\033[0m"
-
-        # 检查是否切换分支，需二次确认
-        local INSTALLED_BRANCH
-        INSTALLED_BRANCH=$(get_installed_branch)
-        if [[ -n "$INSTALLED_BRANCH" && "$INSTALLED_BRANCH" != "unknown" && "$INSTALLED_BRANCH" != "$SELECTED_BRANCH" ]]; then
-            local BRANCH_DISPLAY
-            case "$INSTALLED_BRANCH" in
-                mainline) BRANCH_DISPLAY="Mainline（主线）" ;;
-                stable) BRANCH_DISPLAY="Stable（稳定）" ;;
-                beta) BRANCH_DISPLAY="Beta（测试 - 激进优化）" ;;
-                *) BRANCH_DISPLAY="$INSTALLED_BRANCH" ;;
-            esac
-            echo ""
-            echo -e "\033[31m⚠️ 您正在从 ${BRANCH_DISPLAY} 切换到 ${SELECTED_BRANCH} 分支\033[0m"
-            echo -e "\033[33m   切换分支会卸载当前内核，安装新分支的内核。\033[0m"
-            echo -n -e "\033[36m确认切换？(y/n): \033[0m"
-            read -r confirm
-            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-                echo -e "\033[33m已取消操作。\033[0m"
-                return 0
-            fi
-        fi
 
         ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$SELECTED_TAG" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
         
