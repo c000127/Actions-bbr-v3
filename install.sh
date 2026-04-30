@@ -1,790 +1,302 @@
 #!/bin/bash
 set -uo pipefail
 
-# BBR v3 管理脚本 — c000127 fork
+# BBRv3 VPS 内核安装脚本
 # 基于 XanMod 内核 fork，BBRv3 由 Google 官方源码预集成
-#
-# 相较上游的主要改进：
-#   - set -uo pipefail + root 权限检查
-#   - 依赖检查优化（跳过系统内置包，单次 apt-get update）
-#   - 安全下载目录（mktemp -d + EXIT trap 自动清理）
-#   - API 调用增加重试、分页和 JSON 校验
-#   - 版本号规范化（支持 RC / 两段版本号）
-#   - 跳过 linux-libc-dev 下载（运行时不需要）
-#   - 配置文件命名迁移（自动从旧版迁移）
-#   - 版本列表标记已安装版本
-#   - 增强状态显示（运行内核、BBR 版本、算法+队列）
-#   - apt-get remove 安全选项终结符 (--)
+# https://github.com/c000127/Actions-bbr-v3
 
-# 限制脚本仅支持基于 Debian/Ubuntu 的系统
-if ! command -v apt-get &> /dev/null; then
-    echo -e "\033[31m此脚本仅支持基于 Debian/Ubuntu 的系统，请在支持 apt-get 的系统上运行！\033[0m"
+# ── 环境检查 ──────────────────────────────────────────────
+
+if ! command -v apt-get &>/dev/null; then
+    echo -e "\033[31m此脚本仅支持 Debian/Ubuntu 系统\033[0m"
     exit 1
 fi
 
-# 检查 root 权限
 if [[ $EUID -ne 0 ]]; then
-    if ! sudo -n true 2>/dev/null; then
-        echo -e "\033[33m此脚本需要 root 权限，请输入密码以继续...\033[0m"
-        sudo true || { echo -e "\033[31m无法获取 root 权限，退出。\033[0m"; exit 1; }
-    fi
+    sudo -n true 2>/dev/null || sudo true || { echo -e "\033[31m需要 root 权限\033[0m"; exit 1; }
 fi
 
-# 检查并安装必要的依赖（仅检查 Debian 非必备包）
-# dpkg, awk, sed, sysctl 属于 Debian 必备包（dpkg, mawk, sed, procps），无需检查
-#
-# 命令 → 包名映射（通过 command -v 检测）
-declare -A CMD_PKG_MAP=(
-    ["curl"]="curl"
-    ["wget"]="wget"
-    ["jq"]="jq"
-)
-# 必需包列表（通过 dpkg -s 检测，无对应命令或命令名与包名不同）
-#   ca-certificates    — HTTPS 证书，缺失则 curl/wget 无法下载
-#   initramfs-tools    — 内核安装后生成 initrd，缺失则无法启动新内核
-REQUIRED_PKGS=("ca-certificates" "initramfs-tools")
-
-apt_updated=false
-install_failed=false
-
-# 1) 检查命令类依赖
-for cmd in "${!CMD_PKG_MAP[@]}"; do
-    if ! command -v "$cmd" &> /dev/null; then
-        echo -e "\033[33m缺少依赖：$cmd，正在安装 ${CMD_PKG_MAP[$cmd]}...\033[0m"
-        if ! $apt_updated; then sudo apt-get update > /dev/null 2>&1; apt_updated=true; fi
-        if ! sudo apt-get install -y "${CMD_PKG_MAP[$cmd]}" > /dev/null 2>&1; then
-            echo -e "\033[31m安装 ${CMD_PKG_MAP[$cmd]} 失败！\033[0m"
-            install_failed=true
-        fi
-    fi
-done
-
-# 2) 检查包类依赖
-for pkg in "${REQUIRED_PKGS[@]}"; do
-    if ! dpkg -s "$pkg" &> /dev/null 2>&1; then
-        echo -e "\033[33m缺少依赖包：$pkg，正在安装...\033[0m"
-        if ! $apt_updated; then sudo apt-get update > /dev/null 2>&1; apt_updated=true; fi
-        if ! sudo apt-get install -y "$pkg" > /dev/null 2>&1; then
-            echo -e "\033[31m安装 $pkg 失败！\033[0m"
-            install_failed=true
-        fi
-    fi
-done
-
-if $install_failed; then
-    echo -e "\033[31m部分依赖安装失败，脚本可能无法正常工作。请检查 apt 源配置后重试。\033[0m"
-    exit 1
-fi
-
-# 检测系统架构
 ARCH=$(uname -m)
-if [[ "$ARCH" != "aarch64" && "$ARCH" != "x86_64" ]]; then
-    echo -e "\033[31m(￣□￣)哇！这个脚本只支持 ARM 和 x86_64 架构哦~ 您的系统架构是：$ARCH\033[0m"
+if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
+    echo -e "\033[31m不支持的架构: $ARCH\033[0m"
     exit 1
 fi
 
-# 内核品牌标识（用于匹配已安装的内核包）
+# ── 依赖安装 ──────────────────────────────────────────────
+
+NEED_INSTALL=()
+command -v curl  &>/dev/null || NEED_INSTALL+=(curl)
+command -v wget  &>/dev/null || NEED_INSTALL+=(wget)
+command -v jq    &>/dev/null || NEED_INSTALL+=(jq)
+dpkg -s ca-certificates   &>/dev/null 2>&1 || NEED_INSTALL+=(ca-certificates)
+dpkg -s initramfs-tools   &>/dev/null 2>&1 || NEED_INSTALL+=(initramfs-tools)
+
+if [[ ${#NEED_INSTALL[@]} -gt 0 ]]; then
+    echo -e "\033[33m安装依赖: ${NEED_INSTALL[*]}\033[0m"
+    sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends "${NEED_INSTALL[@]}"
+fi
+
+# ── 常量 ──────────────────────────────────────────────────
+
 KERNEL_BRAND="bbrv3"
-
-# sysctl 配置文件路径
 SYSCTL_CONF="/etc/sysctl.d/99-${KERNEL_BRAND}.conf"
-# 模块自动加载配置文件路径
-MODULES_CONF="/etc/modules-load.d/${KERNEL_BRAND}-qdisc.conf"
-
-# 迁移旧版配置文件（从 c000127-bbrv3 → bbrv3）
-OLD_SYSCTL_CONF="/etc/sysctl.d/99-c000127-bbrv3.conf"
-OLD_MODULES_CONF="/etc/modules-load.d/c000127-bbrv3-qdisc.conf"
-if [[ -f "$OLD_SYSCTL_CONF" && "$OLD_SYSCTL_CONF" != "$SYSCTL_CONF" ]]; then
-    sudo mv "$OLD_SYSCTL_CONF" "$SYSCTL_CONF" 2>/dev/null
-fi
-if [[ -f "$OLD_MODULES_CONF" && "$OLD_MODULES_CONF" != "$MODULES_CONF" ]]; then
-    sudo mv "$OLD_MODULES_CONF" "$MODULES_CONF" 2>/dev/null
-fi
-
-# 创建安全的下载目录
 DOWNLOAD_DIR=$(mktemp -d)
 trap "rm -rf '$DOWNLOAD_DIR'" EXIT
 
-# 函数：清理 sysctl.d 中的旧配置
-clean_sysctl_conf() {
-    sudo touch "$SYSCTL_CONF"
-    sudo sed -i '/net.core.default_qdisc/d' "$SYSCTL_CONF"
-    sudo sed -i '/net.ipv4.tcp_congestion_control/d' "$SYSCTL_CONF"
-    sudo sed -i '/net.ipv4.tcp_ecn/d' "$SYSCTL_CONF"
-    sudo sed -i '/net.ipv4.tcp_fastopen/d' "$SYSCTL_CONF"
-    # Beta 调优项
-    sudo sed -i '/net.ipv4.tcp_slow_start_after_idle/d' "$SYSCTL_CONF"
-    sudo sed -i '/net.ipv4.tcp_notsent_lowat/d' "$SYSCTL_CONF"
-    sudo sed -i '/net.ipv4.tcp_mtu_probing/d' "$SYSCTL_CONF"
-    sudo sed -i '/^# Beta/d' "$SYSCTL_CONF"
+# 迁移旧版配置
+OLD_CONF="/etc/sysctl.d/99-c000127-bbrv3.conf"
+[[ -f "$OLD_CONF" && "$OLD_CONF" != "$SYSCTL_CONF" ]] && sudo mv "$OLD_CONF" "$SYSCTL_CONF" 2>/dev/null
+
+# ── 工具函数 ──────────────────────────────────────────────
+
+get_installed_version() {
+    local pkg
+    pkg=$(dpkg -l 2>/dev/null | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | head -1)
+    [[ -n "$pkg" ]] && echo "$pkg" | sed "s/linux-image-//;s/-xanmod[0-9]*.*//;s/-${KERNEL_BRAND}//"
 }
 
-# 函数：加载队列调度模块
-load_qdisc_module() {
-    local qdisc_name="$1"
-    local module_name="sch_$qdisc_name"
-    
-    # 检查队列算法是否已可用（通过尝试读取当前可用的 qdisc）
-    # 如果 sysctl 能成功设置，说明模块已存在
-    if sudo sysctl -w net.core.default_qdisc="$qdisc_name" > /dev/null 2>&1; then
-        # 恢复原设置
-        sudo sysctl -w net.core.default_qdisc="$CURRENT_QDISC" > /dev/null 2>&1
-        return 0
-    fi
-    
-    # 检查模块是否已加载
-    if lsmod | grep -q "^${module_name//-/_}"; then
-        return 0
-    fi
-    
-    # 模块不存在，尝试加载
-    echo -e "\033[36m正在加载内核模块 $module_name...\033[0m"
-    if sudo modprobe "$module_name" 2>/dev/null; then
-        echo -e "\033[1;32m✔ 模块 $module_name 加载成功\033[0m"
-        return 0
-    else
-        echo -e "\033[33m⚠ 模块 $module_name 加载失败，可能内核不支持\033[0m"
-        return 1
-    fi
-}
-
-# 函数：询问是否永久保存更改
-ask_to_save() {
-    # 首先尝试加载队列调度模块
-    load_qdisc_module "$QDISC"
-    
-    # 检测是否为 Beta 分支（决定是否应用额外调优）
-    local IS_BETA=false
-    [[ "$(get_installed_branch)" == "beta" ]] && IS_BETA=true
-    
-    # 立即应用设置
-    echo -e "\033[36m正在应用配置...\033[0m"
-    sudo sysctl -w net.core.default_qdisc="$QDISC" > /dev/null 2>&1
-    sudo sysctl -w net.ipv4.tcp_congestion_control="$ALGO" > /dev/null 2>&1
-    if $IS_BETA; then
-        # Beta 分支：完整网络调优（ECN + TFO + 缓冲区 + 更多）
-        _apply_beta_sysctl_live
-    else
-        # 通用：ECN 被动模式 + TCP 快速打开
-        sudo sysctl -w net.ipv4.tcp_ecn=2 > /dev/null 2>&1
-        sudo sysctl -w net.ipv4.tcp_fastopen=1027 > /dev/null 2>&1
-    fi
-    
-    # 验证是否生效
-    NEW_QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-    NEW_ALGO=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-    
-    if [[ "$NEW_QDISC" == "$QDISC" && "$NEW_ALGO" == "$ALGO" ]]; then
-        echo -e "\033[1;32m✔ 配置已立即生效！\033[0m"
-        echo -e "\033[36m  当前队列算法：\033[1;32m$NEW_QDISC\033[0m"
-        echo -e "\033[36m  当前拥塞控制：\033[1;32m$NEW_ALGO\033[0m"
-    else
-        echo -e "\033[31m✘ 配置应用失败！\033[0m"
-        echo -e "\033[33m  队列算法期望：$QDISC，实际：$NEW_QDISC\033[0m"
-        echo -e "\033[33m  拥塞控制期望：$ALGO，实际：$NEW_ALGO\033[0m"
-        echo -e "\033[33m  可能原因：当前内核不支持 $QDISC 队列算法\033[0m"
-        return 1
-    fi
-    
-    echo -n -e "\033[36m(｡♥‿♥｡) 要将这些配置永久保存到 $SYSCTL_CONF 吗？(y/n): \033[0m"
-    read -r SAVE
-    if [[ "$SAVE" == "y" || "$SAVE" == "Y" ]]; then
-        clean_sysctl_conf
-        echo "net.core.default_qdisc=$QDISC" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-        echo "net.ipv4.tcp_congestion_control=$ALGO" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-        if $IS_BETA; then
-            _write_beta_sysctl_conf
-        else
-            echo "net.ipv4.tcp_ecn=2" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-            echo "net.ipv4.tcp_fastopen=1027" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-        fi
-        sudo sysctl --system > /dev/null 2>&1
-        
-        # 配置模块开机自动加载（fq 和 fq_codel 是内置的不需要）
-        if [[ "$QDISC" == "fq" || "$QDISC" == "fq_codel" ]]; then
-            # fq 和 fq_codel 是内核内置的，删除旧的模块配置文件
-            sudo rm -f "$MODULES_CONF"
-            echo -e "\033[1;32m(☆^ー^☆) 更改已永久保存啦~\033[0m"
-        else
-            echo "sch_$QDISC" | sudo tee "$MODULES_CONF" > /dev/null
-            echo -e "\033[1;32m(☆^ー^☆) 更改已永久保存，模块 sch_$QDISC 将在开机时自动加载~\033[0m"
-        fi
-    else
-        echo -e "\033[33m(⌒_⌒;) 好吧，没有永久保存，重启后会恢复原设置呢~\033[0m"
-    fi
-}
-
-# 函数：立即应用 Beta 专属 sysctl 调优（内部使用）
-# 缓冲区值与 kernel.sh 对齐；tcp_ecn=2 为 BBRv3 关键调优项保留
-_apply_beta_sysctl_live() {
-    sudo sysctl -w net.ipv4.tcp_ecn=2 > /dev/null 2>&1
-    sudo sysctl -w net.ipv4.tcp_fastopen=1027 > /dev/null 2>&1
-    sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 > /dev/null 2>&1
-    sudo sysctl -w net.ipv4.tcp_notsent_lowat=16384 > /dev/null 2>&1
-}
-
-# 函数：将 Beta 调优写入 sysctl 配置文件（追加到 SYSCTL_CONF）
-_write_beta_sysctl_conf() {
-    {
-        echo "# Beta 专属网络调优"
-        echo "net.ipv4.tcp_ecn=2"
-        echo "net.ipv4.tcp_fastopen=1027"
-        echo "net.ipv4.tcp_slow_start_after_idle=0"
-        echo "net.ipv4.tcp_notsent_lowat=16384"
-    } | sudo tee -a "$SYSCTL_CONF" > /dev/null
-}
-
-# 函数：Beta 专属网络调优（独立菜单选项）
-apply_beta_sysctl() {
-    local INSTALLED_BRANCH
-    INSTALLED_BRANCH=$(get_installed_branch)
-    if [[ "$INSTALLED_BRANCH" != "beta" ]]; then
-        echo -e "\033[33m⚠ 未检测到 Beta 分支内核（当前：${INSTALLED_BRANCH:-"未安装"}）\033[0m"
-        echo -e "\033[33m  这些调优参数在任何内核上均可使用，但为 Beta 内核专门设计。\033[0m"
-        echo -n -e "\033[36m仍要继续？(y/n): \033[0m"
-        read -r confirm
-        [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return 0
-    fi
-    
-    _apply_beta_sysctl_live
-    
-    echo -e "\033[1;32m✔ Beta 网络调优已应用！\033[0m"
-    echo -e "\033[36m  ┌ tcp_ecn=2                     ECN 被动模式（BBRv3 关键搭配）\033[0m"
-    echo -e "\033[36m  ├ tcp_fastopen=1027              TFO 全开（免 Cookie）\033[0m"
-    echo -e "\033[36m  ├ tcp_slow_start_after_idle=0    禁用空闲慢启动\033[0m"
-    echo -e "\033[36m  └ tcp_notsent_lowat=16384        减少缓冲膨胀\033[0m"
-    
-    echo -n -e "\033[36m(｡♥‿♥｡) 要永久保存这些设置吗？(y/n): \033[0m"
-    read -r SAVE
-    if [[ "$SAVE" == "y" || "$SAVE" == "Y" ]]; then
-        # 保留当前 qdisc 和拥塞控制设置
-        local current_qdisc current_algo
-        current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-        current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-        clean_sysctl_conf
-        echo "net.core.default_qdisc=${current_qdisc}" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-        echo "net.ipv4.tcp_congestion_control=${current_algo}" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-        _write_beta_sysctl_conf
-        sudo sysctl --system > /dev/null 2>&1
-        echo -e "\033[1;32m(☆^ー^☆) Beta 调优已永久保存！\033[0m"
-    else
-        echo -e "\033[33m(⌒_⌒;) 未永久保存，重启后会恢复原设置\033[0m"
-    fi
-}
-
-# 函数：规范化内核版本号（补齐 SUBLEVEL）
-# "7.0-rc1" → "7.0.0-rc1"，"7.0" → "7.0.0"，"6.12.5" 不变
 normalize_version() {
     local ver="$1"
-    if [[ "$ver" =~ ^([0-9]+\.[0-9]+)(-.*)?$ ]]; then
-        echo "${BASH_REMATCH[1]}.0${BASH_REMATCH[2]}"
-    else
-        echo "$ver"
-    fi
+    [[ "$ver" =~ ^([0-9]+\.[0-9]+)(-.*)?$ ]] && echo "${BASH_REMATCH[1]}.0${BASH_REMATCH[2]}" || echo "$ver"
 }
 
-# 函数：生成 tag 的排序键（正式版 > rc 预发布）
-# 例：7.0-mainline-beta > 7.0-rc7-mainline-beta > 7.0-rc6-mainline-beta
-kernel_tag_sort_key() {
-    local tag="$1"
-    local branch="$2"
-    local core="$tag"
-    local major minor patch rc
-    local release_weight rc_weight
-
-    core="${core#x86_64-}"
-    core="${core#arm64-}"
-
-    case "$branch" in
-        beta)
-            core="${core%-mainline-beta}"
-            core="${core%-beta}"
-            ;;
-        mainline|stable)
-            core="${core%-${branch}}"
-            ;;
-    esac
-
-    core=$(normalize_version "$core")
-
-    if [[ "$core" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-rc([0-9]+))?$ ]]; then
-        major="${BASH_REMATCH[1]}"
-        minor="${BASH_REMATCH[2]}"
-        patch="${BASH_REMATCH[3]}"
-        rc="${BASH_REMATCH[5]:-}"
-
+# 版本排序键: 7.0.2 > 7.0.2-rc1
+version_sort_key() {
+    local tag="${1#x86_64-}"
+    tag="${tag#arm64-}"
+    tag=$(normalize_version "$tag")
+    if [[ "$tag" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-rc([0-9]+))?$ ]]; then
+        local rc="${BASH_REMATCH[5]:-}"
         if [[ -n "$rc" ]]; then
-            release_weight=0
-            rc_weight="$rc"
+            printf "%08d.%08d.%08d.0.%08d" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "$rc"
         else
-            release_weight=1
-            rc_weight=999999
+            printf "%08d.%08d.%08d.1.999999" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
         fi
-
-        printf "%08d.%08d.%08d.%d.%08d" "$major" "$minor" "$patch" "$release_weight" "$rc_weight"
     else
         echo "00000000.00000000.00000000.0.00000000"
     fi
 }
 
-# 函数：按内核版本从新到旧排序 tags
-sort_kernel_tags_desc() {
-    local branch="$1"
-    local tags="$2"
-
+sort_tags_desc() {
     while IFS= read -r tag; do
         [[ -z "$tag" ]] && continue
-        printf "%s\t%s\n" "$(kernel_tag_sort_key "$tag" "$branch")" "$tag"
-    done <<< "$tags" | sort -r | cut -f2
+        printf "%s\t%s\n" "$(version_sort_key "$tag")" "$tag"
+    done <<< "$1" | sort -r | cut -f2
 }
 
-# 函数：获取已安装的内核版本（返回版本号）
-get_installed_version() {
-    local pkg
-    pkg=$(dpkg -l | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | head -n 1)
-    if [[ -n "$pkg" ]]; then
-        # linux-image-7.0.2-xanmod1-bbrv3 → 7.0.2
-        echo "$pkg" | sed "s/linux-image-//;s/-xanmod[0-9]*.*//;s/-${KERNEL_BRAND}//"
-    fi
-}
+# ── 核心函数 ──────────────────────────────────────────────
 
-# 函数：获取已安装内核的分支类型
-get_installed_branch() {
-    local ver
-    ver=$(get_installed_version)
-    if [[ -z "$ver" ]]; then
-        echo ""
-    else
-        echo "xanmod"
-    fi
-}
-
-# 函数：选择内核分支（结果保存在 SELECTED_BRANCH 变量中）
-select_branch() {
-    SELECTED_BRANCH="xanmod"
-    return 0
-}
-
-# 函数：智能更新（已安装则提示更新，未安装则直接安装）
-smart_select_branch() {
-    local INSTALLED_VERSION
-    INSTALLED_VERSION=$(get_installed_version)
-
-    if [[ -n "$INSTALLED_VERSION" ]]; then
-        echo ""
-        echo -e "\033[34m  ┌─\033[1;34m 📦 已安装内核\033[0m"
-        echo -e "\033[34m  └\033[0m    \033[36m当前版本：\033[0m\033[1;32m${INSTALLED_VERSION}\033[0m"
-    fi
-    SELECTED_BRANCH="xanmod"
-    return 0
-}
-
-# 函数：智能更新引导加载程序
-update_bootloader() {
-    echo -e "\033[36m正在更新引导加载程序...\033[0m"
-    if command -v update-grub &> /dev/null; then
-        echo -e "\033[33m检测到 GRUB，正在执行 update-grub...\033[0m"
-        if sudo update-grub; then
-            echo -e "\033[1;32mGRUB 更新成功！\033[0m"
-            return 0
-        else
-            echo -e "\033[1;31mGRUB 更新失败！\033[0m"
-            return 1
-        fi
-    else
-        echo -e "\033[33m未找到 'update-grub'。您的系统可能使用 U-Boot 或其他引导程序。\033[0m"
-        echo -e "\033[33m在许多 ARM 系统上，内核安装包会自动处理引导更新，通常无需手动操作。\033[0m"
-        echo -e "\033[33m如果重启后新内核未生效，您可能需要手动更新引导配置，请参考您系统的文档。\033[0m"
-        return 0
-    fi
-}
-
-# 函数：安全地安装下载的包
-install_packages() {
-    if ! ls "$DOWNLOAD_DIR"/linux-*.deb &> /dev/null; then
-        echo -e "\033[31m错误：未在下载目录下找到内核文件，安装中止。\033[0m"
+fetch_releases() {
+    local data
+    data=$(curl -sL --retry 3 --retry-delay 2 "https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100")
+    if [[ -z "$data" ]] || ! echo "$data" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        echo -e "\033[31m获取版本信息失败，请检查网络\033[0m" >&2
         return 1
     fi
-    
-    echo -e "\033[36m开始卸载旧版内核... \033[0m"
-    INSTALLED_PACKAGES=$(dpkg -l | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
-    if [[ -n "$INSTALLED_PACKAGES" ]]; then
-        sudo apt-get remove --purge -y -- $INSTALLED_PACKAGES > /dev/null 2>&1
-    fi
-
-    echo -e "\033[36m开始安装新内核... \033[0m"
-    # dpkg postinst 会自动执行 update-initramfs 和 update-grub
-    if sudo dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
-        echo -e "\033[1;32m━━━━━━━━ 安装完成 ━━━━━━━━\033[0m"
-        NEW_KERNEL_VER=$(get_installed_version)
-        echo -e "\033[36m  新内核：    \033[1;32m${NEW_KERNEL_VER:-"未知"}\033[0m"
-        echo -e "\033[33m  重启前：    $(uname -r)（旧内核仍在运行）\033[0m"
-        # Beta 分支：自动配置 BBR + FQ + 网络调优
-        if [[ "$(get_installed_branch)" == "beta" ]]; then
-            echo ""
-            echo -e "\033[1;36m  🧪 Beta 分支：自动配置网络优化\033[0m"
-            sudo sysctl -w net.core.default_qdisc=fq > /dev/null 2>&1
-            sudo sysctl -w net.ipv4.tcp_congestion_control=bbr > /dev/null 2>&1
-            _apply_beta_sysctl_live
-            clean_sysctl_conf
-            echo "net.core.default_qdisc=fq" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-            echo "net.ipv4.tcp_congestion_control=bbr" | sudo tee -a "$SYSCTL_CONF" > /dev/null
-            _write_beta_sysctl_conf
-            sudo sysctl --system > /dev/null 2>&1
-            sudo rm -f "$MODULES_CONF"
-            echo -e "\033[1;32m  ✔ 已自动配置：BBR + FQ + Beta 网络调优\033[0m"
-            echo -e "\033[36m    配置已保存到 $SYSCTL_CONF\033[0m"
-        fi
-        echo -e "\033[33m  ⚠ 需要重启后生效\033[0m"
-        echo -n -e "\033[33m是否立即重启？ (y/n): \033[0m"
-        read -r REBOOT_NOW
-        if [[ "$REBOOT_NOW" == "y" || "$REBOOT_NOW" == "Y" ]]; then
-            echo -e "\033[36m系统即将重启...\033[0m"
-            sudo reboot
-        else
-            echo -e "\033[33m操作完成。请记得稍后手动重启 ('sudo reboot') 来应用新内核。\033[0m"
-        fi
-    else
-        echo -e "\033[1;31m内核安装失败！请检查 dpkg 输出信息并手动修复。\033[0m"
-    fi
+    echo "$data"
 }
 
-# 函数：检查并安装最新版本
-install_latest_version() {
-    smart_select_branch || return 1
+get_arch_filter() {
+    [[ "$ARCH" == "aarch64" ]] && echo "arm64" || echo "x86_64"
+}
 
-    echo -e "\033[36m正在从 GitHub 获取最新版本信息...\033[0m"
-    BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
-    RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
-    if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
-        echo -e "\033[31m从 GitHub 获取版本信息失败。请检查网络连接或 API 状态。\033[0m"
-        return 1
-    fi
+download_and_install() {
+    local tag="$1" release_data="$2"
+    local urls
+    urls=$(echo "$release_data" | jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
 
-    local ARCH_FILTER=""
-    [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
-    [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
-
-    # tag 格式: x86_64-7.0.2（无分支后缀）
-    MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" \
-        '.[] | select(.tag_name | startswith($filter)) | .tag_name')
-
-    if [[ -n "$MATCH_TAGS" ]]; then
-        MATCH_TAGS=$(sort_kernel_tags_desc "$SELECTED_BRANCH" "$MATCH_TAGS")
-    fi
-
-    LATEST_TAG_NAME=$(echo "$MATCH_TAGS" | head -n 1)
-
-    if [[ -z "$LATEST_TAG_NAME" || "$LATEST_TAG_NAME" == "null" ]]; then
-        echo -e "\033[31m未找到适合当前架构 ($ARCH) 的 ${SELECTED_BRANCH} 分支最新版本。\033[0m"
-        return 1
-    fi
-    CORE_LATEST_VERSION="${LATEST_TAG_NAME#x86_64-}"
-    CORE_LATEST_VERSION="${CORE_LATEST_VERSION#arm64-}"
-    INSTALLED_VERSION=$(get_installed_version)
-    echo -e "\033[36m${SELECTED_BRANCH} 最新版本：\033[0m\033[1;32m$CORE_LATEST_VERSION\033[0m  \033[36m已安装：\033[0m\033[1;32m${INSTALLED_VERSION:-"未安装"}\033[0m"
-
-    # 规范化版本号：tag 中 "7.0-rc1-mainline" → "7.0.0-rc1-mainline"，与 dpkg 包名对齐
-    CORE_LATEST_NORMALIZED=$(normalize_version "$CORE_LATEST_VERSION")
-
-    if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$CORE_LATEST_NORMALIZED" ]]; then
-        echo -e "\033[1;32m(o'▽'o) 您已安装最新版本！\033[0m"
-        echo -n -e "\033[36m是否仍要重新安装（例如内核已重新编译）？(y/n): \033[0m"
-        read -r REINSTALL
-        if [[ "$REINSTALL" != "y" && "$REINSTALL" != "Y" ]]; then
-            return 0
-        fi
-    fi
-
-    echo -e "\033[33m准备下载新版本...\033[0m"
-    ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$LATEST_TAG_NAME" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
-    
     rm -f "$DOWNLOAD_DIR"/linux-*.deb
-
-    for URL in $ASSET_URLS; do
-        # 跳过 linux-libc-dev（仅包含 C 库头文件，运行内核不需要）
-        [[ "$URL" == *"linux-libc-dev"* ]] && continue
-        local FILENAME
-        FILENAME=$(basename "$URL")
-        echo -e "\033[36m正在下载：$FILENAME\033[0m"
-        wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$FILENAME\033[0m"; return 1; }
+    for url in $urls; do
+        [[ "$url" == *"linux-libc-dev"* ]] && continue
+        echo -e "\033[36m下载: $(basename "$url")\033[0m"
+        wget -q --show-progress "$url" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败\033[0m"; return 1; }
     done
-    
-    install_packages
+
+    # 卸载旧版
+    local old_pkgs
+    old_pkgs=$(dpkg -l 2>/dev/null | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
+    [[ -n "$old_pkgs" ]] && sudo apt-get remove --purge -y -- $old_pkgs >/dev/null 2>&1
+
+    # 安装新版
+    echo -e "\033[36m安装内核...\033[0m"
+    if sudo dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
+        # 自动配置 BBR + FQ
+        echo -e "\033[36m配置 BBR + FQ...\033[0m"
+        sudo sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+        sudo sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+        sudo sysctl -w net.ipv4.tcp_ecn=2 >/dev/null 2>&1
+        sudo sysctl -w net.ipv4.tcp_fastopen=1027 >/dev/null 2>&1
+
+        # 持久化配置
+        sudo tee "$SYSCTL_CONF" >/dev/null <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_ecn=2
+net.ipv4.tcp_fastopen=1027
+EOF
+        sudo sysctl --system >/dev/null 2>&1
+        sudo rm -f "/etc/modules-load.d/${KERNEL_BRAND}-qdisc.conf"
+
+        echo -e "\033[1;32m━━━━━━ 安装完成 ━━━━━━\033[0m"
+        echo -e "\033[36m  新内核: \033[1;32m$(get_installed_version)\033[0m"
+        echo -e "\033[36m  拥塞控制: \033[1;32mbbr  队列: \033[1;32mfq\033[0m"
+        echo -e "\033[33m  ⚠ 需要重启生效\033[0m"
+        echo -n -e "\033[36m立即重启？(y/n): \033[0m"
+        read -r ans
+        [[ "$ans" == "y" || "$ans" == "Y" ]] && sudo reboot
+    else
+        echo -e "\033[31m安装失败！\033[0m"
+    fi
 }
 
-# 函数：手动选择版本安装
-install_specific_version() {
-    while true; do
-        SELECTED_BRANCH="xanmod"
+# ── 菜单操作 ──────────────────────────────────────────────
 
-        BASE_URL="https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100"
-        RELEASE_DATA=$(curl -sL --retry 3 --retry-delay 2 "$BASE_URL")
-        if [[ -z "$RELEASE_DATA" ]] || ! echo "$RELEASE_DATA" | jq -e 'type == "array"' > /dev/null 2>&1; then
-            echo -e "\033[31m从 GitHub 获取版本信息失败。请检查网络连接或 API 状态。\033[0m"
-            return 1
-        fi
+do_install_latest() {
+    echo -e "\033[36m获取最新版本...\033[0m"
+    local data arch_filter tags latest_tag
+    data=$(fetch_releases) || return 1
+    arch_filter=$(get_arch_filter)
+    tags=$(echo "$data" | jq -r --arg f "$arch_filter" '.[] | select(.tag_name | startswith($f)) | .tag_name')
+    [[ -z "$tags" ]] && { echo -e "\033[31m未找到可用版本\033[0m"; return 1; }
+    tags=$(sort_tags_desc "$tags")
+    latest_tag=$(echo "$tags" | head -1)
 
-        local ARCH_FILTER=""
-        [[ "$ARCH" == "aarch64" ]] && ARCH_FILTER="arm64"
-        [[ "$ARCH" == "x86_64" ]] && ARCH_FILTER="x86_64"
+    local version="${latest_tag#${arch_filter}-}"
+    local installed
+    installed=$(get_installed_version)
+    echo -e "\033[36m最新版本: \033[1;32m$version\033[0m  已安装: \033[1;32m${installed:-无}\033[0m"
 
-        # tag 格式: x86_64-7.0.2（无分支后缀）
-        MATCH_TAGS=$(echo "$RELEASE_DATA" | jq -r --arg filter "$ARCH_FILTER" \
-            '.[] | select(.tag_name | startswith($filter)) | .tag_name')
+    if [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" ]]; then
+        echo -e "\033[1;32m已是最新版本\033[0m"
+        echo -n -e "\033[36m仍要重新安装？(y/n): \033[0m"
+        read -r ans
+        [[ "$ans" != "y" && "$ans" != "Y" ]] && return 0
+    fi
 
-        if [[ -z "$MATCH_TAGS" ]]; then
-            echo -e "\033[31m未找到适合当前架构的 ${SELECTED_BRANCH} 分支版本。\033[0m"
-            return 1
-        fi
-
-        MATCH_TAGS=$(sort_kernel_tags_desc "$SELECTED_BRANCH" "$MATCH_TAGS")
-
-        echo -e "\033[36m以下为 ${SELECTED_BRANCH} 分支适用于当前架构的版本：\033[0m"
-        IFS=$'\n' read -rd '' -a TAG_ARRAY <<<"$MATCH_TAGS"
-        local INSTALLED_VERSION
-        INSTALLED_VERSION=$(get_installed_version)
-
-        for i in "${!TAG_ARRAY[@]}"; do
-            local tag_ver="${TAG_ARRAY[$i]#${ARCH_FILTER}-}"
-            local norm_ver
-            norm_ver=$(normalize_version "$tag_ver")
-            if [[ -n "$INSTALLED_VERSION" && "$INSTALLED_VERSION" == "$norm_ver" ]]; then
-                echo -e "\033[33m $((i+1)). $tag_ver \033[1;32m← 已安装\033[0m"
-            else
-                echo -e "\033[33m $((i+1)). $tag_ver\033[0m"
-            fi
-        done
-
-        echo -n -e "\033[36m请输入要安装的版本编号（0 返回）：\033[0m"
-        read -r CHOICE
-        
-        if [[ "$CHOICE" == "0" ]]; then
-            continue  # 返回分支选择
-        fi
-        
-        if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || (( CHOICE < 1 || CHOICE > ${#TAG_ARRAY[@]} )); then
-            echo -e "\033[31m输入无效编号，取消操作。\033[0m"
-            continue  # 返回分支选择
-        fi
-        
-        INDEX=$((CHOICE-1))
-        SELECTED_TAG="${TAG_ARRAY[$INDEX]}"
-        local selected_ver="${SELECTED_TAG#${ARCH_FILTER}-}"
-        echo -e "\033[36m已选择版本：\033[0m\033[1;32m$selected_ver\033[0m"
-
-        ASSET_URLS=$(echo "$RELEASE_DATA" | jq -r --arg tag "$SELECTED_TAG" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
-        
-        rm -f "$DOWNLOAD_DIR"/linux-*.deb
-        
-        for URL in $ASSET_URLS; do
-            [[ "$URL" == *"linux-libc-dev"* ]] && continue
-            local FILENAME
-            FILENAME=$(basename "$URL")
-            echo -e "\033[36m下载中：$FILENAME\033[0m"
-            wget -q --show-progress "$URL" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败：$FILENAME\033[0m"; return 1; }
-        done
-
-        install_packages
-        return 0
-    done
+    download_and_install "$latest_tag" "$data"
 }
 
-# 美化输出的分隔线
-print_separator() {
-    echo -e "\033[34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+do_install_specific() {
+    echo -e "\033[36m获取可用版本...\033[0m"
+    local data arch_filter tags
+    data=$(fetch_releases) || return 1
+    arch_filter=$(get_arch_filter)
+    tags=$(echo "$data" | jq -r --arg f "$arch_filter" '.[] | select(.tag_name | startswith($f)) | .tag_name')
+    [[ -z "$tags" ]] && { echo -e "\033[31m未找到可用版本\033[0m"; return 1; }
+    tags=$(sort_tags_desc "$tags")
+
+    local installed
+    installed=$(get_installed_version)
+    echo ""
+    local i=0
+    while IFS= read -r tag; do
+        i=$((i+1))
+        local ver="${tag#${arch_filter}-}"
+        if [[ -n "$installed" && "$installed" == "$(normalize_version "$ver")" ]]; then
+            echo -e "\033[33m  $i. $ver \033[1;32m← 已安装\033[0m"
+        else
+            echo -e "\033[33m  $i. $ver\033[0m"
+        fi
+    done <<< "$tags"
+
+    echo ""
+    echo -n -e "\033[36m选择版本编号 (0 取消): \033[0m"
+    read -r choice
+    [[ "$choice" == "0" ]] && return 0
+    [[ ! "$choice" =~ ^[0-9]+$ ]] && { echo -e "\033[31m无效输入\033[0m"; return 1; }
+
+    local selected_tag
+    selected_tag=$(echo "$tags" | sed -n "${choice}p")
+    [[ -z "$selected_tag" ]] && { echo -e "\033[31m无效编号\033[0m"; return 1; }
+
+    echo -e "\033[36m已选择: \033[1;32m${selected_tag#${arch_filter}-}\033[0m"
+    download_and_install "$selected_tag" "$data"
 }
 
-# --- 主要执行流程 ---
+do_check_status() {
+    echo ""
+    local installed running
+    installed=$(get_installed_version)
+    running=$(uname -r)
 
-RUNNING_KERNEL=$(uname -r)
+    echo -e "\033[34m  ┌─\033[1;34m 📋 内核信息\033[0m"
+    if [[ -n "$installed" ]]; then
+        echo -e "\033[34m  │\033[0m    \033[36m已安装: \033[1;32m$installed\033[0m"
+        if [[ "$running" == *"$KERNEL_BRAND"* ]]; then
+            echo -e "\033[34m  │\033[0m    \033[36m运行中: \033[1;32m$running ✔\033[0m"
+        else
+            echo -e "\033[34m  │\033[0m    \033[33m运行中: $running（需重启）\033[0m"
+        fi
+    else
+        echo -e "\033[34m  │\033[0m    \033[36m运行中: \033[1;32m$running\033[0m"
+        echo -e "\033[34m  │\033[0m    \033[33m未安装优化内核\033[0m"
+    fi
+
+    # BBR 状态
+    local algo qdisc bbr_ver
+    algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    bbr_ver=$(modinfo tcp_bbr 2>/dev/null | awk '/^version:/ {print $2}')
+
+    echo -e "\033[34m  │\033[0m"
+    echo -e "\033[34m  │\033[0m    \033[36m拥塞控制: \033[1;32m$algo\033[0m  队列: \033[1;32m$qdisc\033[0m"
+    if [[ "$bbr_ver" == "3" ]]; then
+        echo -e "\033[34m  └\033[0m    \033[36mBBR 版本: \033[1;32mv3 ✔\033[0m"
+    elif [[ -n "$bbr_ver" ]]; then
+        echo -e "\033[34m  └\033[0m    \033[33mBBR 版本: $bbr_ver（非 v3）\033[0m"
+    else
+        echo -e "\033[34m  └\033[0m    \033[33mBBR 模块未加载\033[0m"
+    fi
+}
+
+do_uninstall() {
+    local pkgs
+    pkgs=$(dpkg -l 2>/dev/null | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
+    if [[ -z "$pkgs" ]]; then
+        echo -e "\033[33m未找到已安装的优化内核\033[0m"
+        return
+    fi
+    echo -e "\033[36m将卸载: \033[33m$pkgs\033[0m"
+    sudo apt-get remove --purge -y -- $pkgs
+    sudo rm -f "$SYSCTL_CONF"
+    echo -e "\033[1;32m已卸载，请重启系统\033[0m"
+}
+
+# ── 主循环 ────────────────────────────────────────────────
 
 while true; do
+    clear
+    echo ""
+    echo -e "\033[1;33m  ╔═══════════════════════════════════════════════╗\033[0m"
+    echo -e "\033[1;33m  ║    BBRv3 VPS 内核管理 · XanMod + Google BBRv3 ║\033[0m"
+    echo -e "\033[1;33m  ╚═══════════════════════════════════════════════╝\033[0m"
+    echo ""
 
-clear
-echo ""
-echo -e "\033[1;33m  ╔══════════════════════════════════════════════════════╗\033[0m"
-echo -e "\033[1;33m  ║    (☆ω☆) BBR v3 管理脚本 · VPS 优化版 (☆ω☆)       ║\033[0m"
-echo -e "\033[1;33m  ╚══════════════════════════════════════════════════════╝\033[0m"
-echo -e "\033[2;36m  作者：C000127  |  Fork of byJoey/Actions-bbr-v3\033[0m"
-echo ""
-# 每次循环刷新状态信息
-INSTALLED_BBR_VER=$(get_installed_version)
-CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
-echo -e "\033[34m  ┌─\033[1;34m 📊 系统状态\033[0m"
-if [[ -n "$INSTALLED_BBR_VER" ]]; then
-    INSTALLED_BRANCH=$(get_installed_branch)
-    case "$INSTALLED_BRANCH" in
-        mainline) BRANCH_LABEL="Mainline（主线）" ;;
-        stable) BRANCH_LABEL="Stable（稳定）" ;;
-        beta) BRANCH_LABEL="Beta（测试 - 激进优化）" ;;
-        *) BRANCH_LABEL="未知分支" ;;
+    # 状态栏
+    local_ver=$(get_installed_version)
+    cur_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    echo -e "\033[36m  内核: \033[1;32m${local_ver:-未安装}\033[0m  拥塞: \033[1;32m$cur_algo\033[0m  队列: \033[1;32m$cur_qdisc\033[0m"
+    echo ""
+    echo -e "  \033[33m1.\033[0m 安装/更新到最新版本"
+    echo -e "  \033[33m2.\033[0m 手动选择版本安装"
+    echo -e "  \033[33m3.\033[0m 查看内核与 BBR 状态"
+    echo -e "  \033[33m4.\033[0m 卸载优化内核"
+    echo -e "  \033[33m0.\033[0m 退出"
+    echo ""
+    echo -n -e "\033[36m选择 (0-4): \033[0m"
+    read -r action
+
+    case "$action" in
+        0) echo -e "\033[1;35m再见！\033[0m"; exit 0 ;;
+        1) do_install_latest ;;
+        2) do_install_specific ;;
+        3) do_check_status ;;
+        4) do_uninstall ;;
+        *) echo -e "\033[31m无效选择\033[0m" ;;
     esac
-    echo -e "\033[34m  │\033[0m    \033[36m内核版本：\033[0m\033[1;32m${INSTALLED_BBR_VER}\033[0m"
-    echo -e "\033[34m  │\033[0m    \033[36m内核分支：\033[0m\033[1;32m${BRANCH_LABEL}\033[0m"
-else
-    echo -e "\033[34m  │\033[0m    \033[36m运行内核：\033[0m\033[1;32m$RUNNING_KERNEL\033[0m\033[33m（未安装优化内核）\033[0m"
-fi
-echo -e "\033[34m  └\033[0m    \033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO\033[0m  \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC\033[0m"
-echo ""
-echo -e "\033[32m  ┌─\033[1;32m 🚀 内核管理\033[0m"
-echo -e "\033[32m  │\033[0m    \033[33m1.\033[0m \033[36m安装或更新 VPS 优化内核\033[0m"
-echo -e "\033[32m  │\033[0m    \033[33m2.\033[0m \033[36m手动选择分支和版本安装\033[0m"
-echo -e "\033[32m  │\033[0m    \033[33m3.\033[0m \033[36m查看内核与 BBR 状态\033[0m"
-echo -e "\033[32m  └\033[0m    \033[33m4.\033[0m \033[36m卸载优化内核\033[0m"
-echo ""
-echo -e "\033[35m  ┌─\033[1;35m ⚡ 网络加速\033[0m"
-echo -e "\033[35m  │\033[0m    \033[33m5.\033[0m \033[36m启用 BBR + FQ\033[0m"
-echo -e "\033[35m  │\033[0m    \033[33m6.\033[0m \033[36m启用 BBR + FQ_CODEL\033[0m"
-echo -e "\033[35m  │\033[0m    \033[33m7.\033[0m \033[36m启用 BBR + FQ_PIE\033[0m"
-echo -e "\033[35m  └\033[0m    \033[33m8.\033[0m \033[36m启用 BBR + CAKE\033[0m"
-echo ""
-echo -e "\033[31m  ┌─\033[1;31m 🧪 Beta 专属\033[0m"
-echo -e "\033[31m  └\033[0m    \033[33m9.\033[0m \033[36m应用 Beta 网络调优（ECN/TFO/缓冲区）\033[0m"
-echo ""
-echo -e "\033[33m  0. 🚪 退出脚本\033[0m"
-echo ""
-echo -n -e "\033[36m请选择一个操作 (0-9) (｡・ω・｡): \033[0m"
-read -r ACTION
 
-case "$ACTION" in
-    0)
-        echo -e "\033[1;35m(｡･ω･｡)ﾉ 拜拜~ 下次再见哦！\033[0m"
-        exit 0
-        ;;
-    1)
-        echo -e "\033[1;32m٩(｡•́‿•̀｡)۶ 您选择了安装或更新内核！\033[0m"
-        install_latest_version
-        continue
-        ;;
-    2)
-        echo -e "\033[1;32m(｡･∀･)ﾉﾞ 您选择了手动选择版本安装！\033[0m"
-        install_specific_version
-        continue
-        ;;
-    3)
-        echo ""
-        # 内核版本信息
-        INSTALLED_VER=$(get_installed_version)
-        INSTALLED_BR=$(get_installed_branch)
-        echo -e "\033[32m  ┌─\033[1;32m 📋 内核信息\033[0m"
-        RUNNING_VER=$(uname -r)
-        if [[ -z "$INSTALLED_VER" ]]; then
-            echo -e "\033[32m  │\033[0m    \033[36m运行内核：\033[0m\033[1;32m$RUNNING_VER\033[0m"
-            echo -e "\033[32m  └\033[0m    \033[33m未检测到由本脚本安装的优化内核。\033[0m"
-        elif [[ "$RUNNING_VER" == *"$KERNEL_BRAND"* ]]; then
-            # 运行的就是已安装的优化内核
-            echo -e "\033[32m  │\033[0m    \033[36m内核：    \033[0m\033[1;32m$INSTALLED_VER\033[0m"
-        else
-            # 已安装但未重启，运行的是旧内核
-            echo -e "\033[32m  │\033[0m    \033[36m已安装：  \033[0m\033[1;32m$INSTALLED_VER\033[0m\033[33m（重启后生效）\033[0m"
-            echo -e "\033[32m  │\033[0m    \033[33m运行中：  $RUNNING_VER（旧内核）\033[0m"
-        fi
-        if [[ -n "$INSTALLED_VER" ]]; then
-            case "$INSTALLED_BR" in
-                mainline)
-                    echo -e "\033[32m  │\033[0m    \033[36m分支：    \033[0m\033[1;32mMainline（主线）\033[0m"
-                    echo -e "\033[32m  └\033[0m    \033[36m特点：    Torvalds 主仓库 | HZ=250 | 最新特性\033[0m"
-                    ;;
-                stable)
-                    echo -e "\033[32m  │\033[0m    \033[36m分支：    \033[0m\033[1;32mStable（稳定）\033[0m"
-                    echo -e "\033[32m  └\033[0m    \033[36m特点：    Greg KH 稳定分支 | HZ=250 | Bug 修复回移\033[0m"
-                    ;;
-                beta)
-                    echo -e "\033[32m  │\033[0m    \033[36m分支：    \033[0m\033[1;31mBeta（测试 - 激进优化）\033[0m"
-                    echo -e "\033[32m  │\033[0m    \033[36m特点：    x86-64-v3 | HZ=1000 | 纯 64 位\033[0m"
-                    echo -e "\033[32m  └\033[0m    \033[36m            NR_CPUS=256 | RCU Lazy\033[0m"
-                    ;;
-                *)
-                    echo -e "\033[32m  └\033[0m    \033[36m分支：    \033[0m\033[33m未知\033[0m"
-                    ;;
-            esac
-        fi
-        echo ""
-        # BBR 状态检查
-        echo -e "\033[34m  ┌─\033[1;34m 🔍 BBR 状态\033[0m"
-        BBR_MODULE_INFO=$(modinfo tcp_bbr 2>/dev/null)
-        if [[ -z "$BBR_MODULE_INFO" ]]; then
-            echo -e "\033[34m  │\033[0m    \033[36m正在刷新模块依赖...\033[0m"
-            sudo depmod -a
-            BBR_MODULE_INFO=$(modinfo tcp_bbr 2>/dev/null)
-        fi
-        if [[ -z "$BBR_MODULE_INFO" ]]; then
-            echo -e "\033[34m  └\033[0m    \033[31m⚠ 未加载 tcp_bbr 模块，请先安装内核并重启\033[0m"
-        else
-            BBR_VERSION=$(echo "$BBR_MODULE_INFO" | awk '/^version:/ {print $2}')
-            CURRENT_ALGO=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-            CURRENT_QDISC=$(sysctl net.core.default_qdisc | awk '{print $3}')
-
-            if [[ "$BBR_VERSION" == "3" ]]; then
-                echo -e "\033[34m  │\033[0m    \033[36mBBR 版本：\033[0m\033[1;32m$BBR_VERSION (v3) ✔\033[0m"
-            else
-                echo -e "\033[34m  │\033[0m    \033[33mBBR 版本：$BBR_VERSION（非 v3）⚠\033[0m"
-            fi
-            if [[ "$CURRENT_ALGO" == "bbr" ]]; then
-                echo -e "\033[34m  │\033[0m    \033[36m拥塞控制：\033[0m\033[1;32m$CURRENT_ALGO ✔\033[0m"
-            else
-                echo -e "\033[34m  │\033[0m    \033[33m拥塞控制：$CURRENT_ALGO（非 bbr）⚠\033[0m"
-            fi
-            echo -e "\033[34m  │\033[0m    \033[36m队列算法：\033[0m\033[1;32m$CURRENT_QDISC ✔\033[0m"
-
-            if [[ "$BBR_VERSION" == "3" && "$CURRENT_ALGO" == "bbr" ]]; then
-                echo -e "\033[34m  └\033[0m    \033[1;32mヽ(✿ﾟ▽ﾟ)ノ BBR v3 已正确安装并生效！\033[0m"
-            else
-                echo -e "\033[34m  └\033[0m    \033[33mBBR v3 未完全生效，请安装内核并重启后使用选项 5-8 启用\033[0m"
-            fi
-        fi
-        ;;
-    4)
-        echo -e "\033[1;32mヽ(・∀・)ノ 您选择了卸载优化内核！\033[0m"
-        PACKAGES_TO_REMOVE=$(dpkg -l | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
-        if [[ -n "$PACKAGES_TO_REMOVE" ]]; then
-            echo -e "\033[36m将要卸载以下内核包: \033[33m$PACKAGES_TO_REMOVE\033[0m"
-            sudo apt-get remove --purge -y -- $PACKAGES_TO_REMOVE
-            update_bootloader
-            echo -e "\033[1;32m内核包已卸载。请记得重启系统。\033[0m"
-        else
-            echo -e "\033[33m未找到由本脚本安装的 '$KERNEL_BRAND' 内核包。\033[0m"
-        fi
-        ;;
-    5)
-        echo -e "\033[1;32m(ﾉ◕ヮ◕)ﾉ*:･ﾟ✧ 使用 BBR + FQ 加速！\033[0m"
-        ALGO="bbr"
-        QDISC="fq"
-        ask_to_save
-        ;;
-    6)
-        echo -e "\033[1;32m(๑•̀ㅂ•́)و✧ 使用 BBR + FQ_CODEL 加速！\033[0m"
-        ALGO="bbr"
-        QDISC="fq_codel"
-        ask_to_save
-        ;;
-    7)
-        echo -e "\033[1;32m٩(•‿•)۶ 使用 BBR + FQ_PIE 加速！\033[0m"
-        ALGO="bbr"
-        QDISC="fq_pie"
-        ask_to_save
-        ;;
-    8)
-        echo -e "\033[1;32m(ﾉ≧∀≦)ﾉ 使用 BBR + CAKE 加速！\033[0m"
-        ALGO="bbr"
-        QDISC="cake"
-        ask_to_save
-        ;;
-    9)
-        echo -e "\033[1;32m(★‿★) 应用 Beta 专属网络调优！\033[0m"
-        apply_beta_sysctl
-        ;;
-    *)
-        echo -e "\033[31m(￣▽￣)ゞ 无效输入，请输入 0-9 之间的数字哦~\033[0m"
-        continue
-        ;;
-esac
-
-# 操作完成后暂停，让用户查看输出
-echo ""
-echo -n -e "\033[36m按回车键返回主菜单...\033[0m"
-read -r
-
-done  # while true
+    echo ""
+    echo -n -e "\033[36m按 Enter 返回菜单...\033[0m"
+    read -r
+done
