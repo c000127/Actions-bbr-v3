@@ -38,7 +38,7 @@ fi
 
 # ── 常量 ──────────────────────────────────────────────────
 
-KERNEL_BRAND="bbrv3"
+KERNEL_BRAND="xanmod"
 SYSCTL_CONF="/etc/sysctl.d/99-${KERNEL_BRAND}.conf"
 DOWNLOAD_DIR=$(mktemp -d)
 trap "rm -rf '$DOWNLOAD_DIR'" EXIT
