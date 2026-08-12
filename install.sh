@@ -13,7 +13,13 @@ if ! command -v apt-get &>/dev/null; then
 fi
 
 if [[ $EUID -ne 0 ]]; then
-    sudo -n true 2>/dev/null || sudo true || { echo -e "\033[31m需要 root 权限\033[0m"; exit 1; }
+    if ! command -v sudo &>/dev/null || ! sudo -v; then
+        echo -e "\033[31m需要 root 权限或可用的 sudo\033[0m"
+        exit 1
+    fi
+    SUDO=(sudo)
+else
+    SUDO=()
 fi
 
 ARCH=$(uname -m)
@@ -33,7 +39,7 @@ dpkg -s initramfs-tools   &>/dev/null 2>&1 || NEED_INSTALL+=(initramfs-tools)
 
 if [[ ${#NEED_INSTALL[@]} -gt 0 ]]; then
     echo -e "\033[33m安装依赖: ${NEED_INSTALL[*]}\033[0m"
-    sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends "${NEED_INSTALL[@]}"
+    "${SUDO[@]}" apt-get update -qq && "${SUDO[@]}" apt-get install -y --no-install-recommends "${NEED_INSTALL[@]}"
 fi
 
 # ── 常量 ──────────────────────────────────────────────────
@@ -41,18 +47,27 @@ fi
 KERNEL_BRAND="xanmod"
 SYSCTL_CONF="/etc/sysctl.d/99-${KERNEL_BRAND}.conf"
 DOWNLOAD_DIR=$(mktemp -d)
-trap "rm -rf '$DOWNLOAD_DIR'" EXIT
+trap 'rm -rf -- "$DOWNLOAD_DIR"' EXIT
 
 # 迁移旧版配置
 OLD_CONF="/etc/sysctl.d/99-c000127-bbrv3.conf"
-[[ -f "$OLD_CONF" && "$OLD_CONF" != "$SYSCTL_CONF" ]] && sudo mv "$OLD_CONF" "$SYSCTL_CONF" 2>/dev/null
+[[ -f "$OLD_CONF" && "$OLD_CONF" != "$SYSCTL_CONF" ]] && "${SUDO[@]}" mv "$OLD_CONF" "$SYSCTL_CONF" 2>/dev/null
 
 # ── 工具函数 ──────────────────────────────────────────────
 
+get_installed_packages() {
+    dpkg-query -W -f='${binary:Package}\n' 'linux-image-*' 2>/dev/null \
+        | grep -F -- "$KERNEL_BRAND" || true
+}
+
 get_installed_version() {
     local pkg
-    pkg=$(dpkg -l 2>/dev/null | grep "linux-image" | grep "$KERNEL_BRAND" | awk '{print $2}' | head -1)
-    [[ -n "$pkg" ]] && echo "$pkg" | sed "s/linux-image-//;s/-xanmod[0-9]*.*//;s/-${KERNEL_BRAND}//"
+    pkg=$(get_installed_packages | head -n 1)
+    pkg=${pkg%%:*}
+    if [[ -n "$pkg" ]]; then
+        echo "$pkg" | sed -E 's/^linux-image-//; s/-xanmod[0-9]+.*$//'
+    fi
+    return 0
 }
 
 normalize_version() {
@@ -88,7 +103,10 @@ sort_tags_desc() {
 
 fetch_releases() {
     local data
-    data=$(curl -sL --retry 3 --retry-delay 2 "https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100")
+    data=$(curl --fail --silent --show-error --location \
+        --retry 3 --retry-all-errors --retry-delay 2 \
+        --connect-timeout 15 --max-time 60 \
+        "https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100") || return 1
     if [[ -z "$data" ]] || ! echo "$data" | jq -e 'type == "array"' >/dev/null 2>&1; then
         echo -e "\033[31m获取版本信息失败，请检查网络\033[0m" >&2
         return 1
@@ -102,51 +120,69 @@ get_arch_filter() {
 
 download_and_install() {
     local tag="$1" release_data="$2"
-    local urls
-    urls=$(echo "$release_data" | jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
+    local urls url old_pkgs downloaded=0
+    urls=$(echo "$release_data" | jq -r --arg tag "$tag" \
+        '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
+
+    if [[ -z "$urls" ]]; then
+        echo -e "\033[31m该 Release 没有可下载的资源\033[0m"
+        return 1
+    fi
 
     rm -f "$DOWNLOAD_DIR"/linux-*.deb
-    for url in $urls; do
-        [[ "$url" == *"linux-libc-dev"* ]] && continue
+    while IFS= read -r url; do
+        [[ -z "$url" || "$url" == *"linux-libc-dev"* ]] && continue
         echo -e "\033[36m下载: $(basename "$url")\033[0m"
-        wget -q --show-progress "$url" -P "$DOWNLOAD_DIR"/ || { echo -e "\033[31m下载失败\033[0m"; return 1; }
-    done
+        if ! wget --https-only --timeout=30 --tries=3 -q --show-progress "$url" -P "$DOWNLOAD_DIR"/; then
+            echo -e "\033[31m下载失败，保留当前已安装内核\033[0m"
+            return 1
+        fi
+        downloaded=$((downloaded + 1))
+    done <<< "$urls"
 
-    # 卸载旧版
-    local old_pkgs
-    old_pkgs=$(dpkg -l 2>/dev/null | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
-    [[ -n "$old_pkgs" ]] && sudo apt-get remove --purge -y -- $old_pkgs >/dev/null 2>&1
+    if [[ "$downloaded" -eq 0 ]] || ! compgen -G "$DOWNLOAD_DIR/linux-*.deb" >/dev/null; then
+        echo -e "\033[31m未下载到内核 Debian 包，保留当前已安装内核\033[0m"
+        return 1
+    fi
 
-    # 安装新版
+    # 先记录旧包；新包安装成功前绝不删除它们，保留可启动的回退内核。
+    old_pkgs=$(get_installed_packages | tr '\n' ' ')
+
     echo -e "\033[36m安装内核...\033[0m"
-    if sudo dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
-        # 自动配置 BBR + FQ
-        echo -e "\033[36m配置 BBR + FQ...\033[0m"
-        sudo sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-        sudo sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
-        sudo sysctl -w net.ipv4.tcp_ecn=2 >/dev/null 2>&1
-        sudo sysctl -w net.ipv4.tcp_fastopen=1027 >/dev/null 2>&1
+    if ! "${SUDO[@]}" dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
+        echo -e "\033[31m安装失败，已保留当前内核！\033[0m"
+        return 1
+    fi
 
-        # 持久化配置
-        sudo tee "$SYSCTL_CONF" >/dev/null <<EOF
+    # 新包已成功安装后再清理旧版；清理失败不影响已安装的新内核。
+    if [[ -n "$old_pkgs" ]] && ! "${SUDO[@]}" apt-get remove --purge -y -- $old_pkgs >/dev/null; then
+        echo -e "\033[33m旧内核清理失败，请在确认新内核可启动后手动处理\033[0m"
+    fi
+
+    # 自动配置 BBR + FQ
+    echo -e "\033[36m配置 BBR + FQ...\033[0m"
+    "${SUDO[@]}" sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
+    "${SUDO[@]}" sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+    "${SUDO[@]}" sysctl -w net.ipv4.tcp_ecn=2 >/dev/null 2>&1 || true
+    "${SUDO[@]}" sysctl -w net.ipv4.tcp_fastopen=1027 >/dev/null 2>&1 || true
+
+    # 持久化配置
+    "${SUDO[@]}" tee "$SYSCTL_CONF" >/dev/null <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_ecn=2
 net.ipv4.tcp_fastopen=1027
 EOF
-        sudo sysctl --system >/dev/null 2>&1
-        sudo rm -f "/etc/modules-load.d/${KERNEL_BRAND}-qdisc.conf"
+    "${SUDO[@]}" sysctl --system >/dev/null 2>&1 || true
+    "${SUDO[@]}" rm -f "/etc/modules-load.d/${KERNEL_BRAND}-qdisc.conf"
 
-        echo -e "\033[1;32m━━━━━━ 安装完成 ━━━━━━\033[0m"
-        echo -e "\033[36m  新内核: \033[1;32m$(get_installed_version)\033[0m"
-        echo -e "\033[36m  拥塞控制: \033[1;32mbbr  队列: \033[1;32mfq\033[0m"
-        echo -e "\033[33m  ⚠ 需要重启生效\033[0m"
-        echo -n -e "\033[36m立即重启？(y/n): \033[0m"
-        read -r ans
-        [[ "$ans" == "y" || "$ans" == "Y" ]] && sudo reboot
-    else
-        echo -e "\033[31m安装失败！\033[0m"
-    fi
+    echo -e "\033[1;32m━━━━━━ 安装完成 ━━━━━━\033[0m"
+    echo -e "\033[36m  新内核: \033[1;32m$(get_installed_version)\033[0m"
+    echo -e "\033[36m  拥塞控制: \033[1;32mbbr  队列: \033[1;32mfq\033[0m"
+    echo -e "\033[33m  ⚠ 需要重启生效\033[0m"
+    echo -n -e "\033[36m立即重启？(y/n): \033[0m"
+    read -r ans
+    [[ "$ans" == "y" || "$ans" == "Y" ]] && "${SUDO[@]}" reboot
 }
 
 # ── 菜单操作 ──────────────────────────────────────────────
@@ -234,31 +270,34 @@ do_check_status() {
 
     # BBR 状态
     local algo qdisc bbr_ver
-    algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
     bbr_ver=$(modinfo tcp_bbr 2>/dev/null | awk '/^version:/ {print $2}')
 
     echo -e "\033[34m  │\033[0m"
     echo -e "\033[34m  │\033[0m    \033[36m拥塞控制: \033[1;32m$algo\033[0m  队列: \033[1;32m$qdisc\033[0m"
     if [[ "$bbr_ver" == "3" ]]; then
         echo -e "\033[34m  └\033[0m    \033[36mBBR 版本: \033[1;32mv3 ✔\033[0m"
+    elif [[ "$algo" == "bbr" ]]; then
+        # BBR 被编译进内核时不会有独立 .ko，modinfo 无法返回版本字段。
+        echo -e "\033[34m  └\033[0m    \033[36mBBR: \033[1;32m已启用（内建，无 modinfo 版本字段）\033[0m"
     elif [[ -n "$bbr_ver" ]]; then
         echo -e "\033[34m  └\033[0m    \033[33mBBR 版本: $bbr_ver（非 v3）\033[0m"
     else
-        echo -e "\033[34m  └\033[0m    \033[33mBBR 模块未加载\033[0m"
+        echo -e "\033[34m  └\033[0m    \033[33mBBR 未启用\033[0m"
     fi
 }
 
 do_uninstall() {
     local pkgs
-    pkgs=$(dpkg -l 2>/dev/null | grep "$KERNEL_BRAND" | awk '{print $2}' | tr '\n' ' ')
+    pkgs=$(get_installed_packages | tr '\n' ' ')
     if [[ -z "$pkgs" ]]; then
         echo -e "\033[33m未找到已安装的优化内核\033[0m"
         return
     fi
     echo -e "\033[36m将卸载: \033[33m$pkgs\033[0m"
-    sudo apt-get remove --purge -y -- $pkgs
-    sudo rm -f "$SYSCTL_CONF"
+    "${SUDO[@]}" apt-get remove --purge -y -- $pkgs
+    "${SUDO[@]}" rm -f "$SYSCTL_CONF"
     echo -e "\033[1;32m已卸载，请重启系统\033[0m"
 }
 
