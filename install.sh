@@ -56,19 +56,25 @@ trap 'rm -rf -- "$DOWNLOAD_DIR"' EXIT
 # ── 工具函数 ──────────────────────────────────────────────
 
 get_installed_packages() {
+    local profile="${1:-standard}"
     dpkg-query -W -f='${db:Status-Status}\t${binary:Package}\n' 'linux-image-*' 2>/dev/null \
-        | awk -F '\t' -v brand="$KERNEL_BRAND" \
-            '$1 == "installed" && index($2, brand) && $2 !~ /-dbg(:.*)?$/ {print $2}' || true
+        | awk -F '\t' -v brand="$KERNEL_BRAND" -v profile="$profile" '
+            $1 == "installed" && index($2, brand) && $2 !~ /-dbg(:.*)?$/ {
+                name = $2
+                sub(/:.*/, "", name)
+                aggressive = (name ~ /-aggressive-xanmod[0-9]+$/)
+                if ((profile == "aggressive" && aggressive) || (profile == "standard" && !aggressive)) print $2
+            }' || true
 }
 
 get_installed_version() {
-    local pkg version
+    local pkg version profile="${1:-standard}"
     while IFS= read -r pkg; do
         [[ -z "$pkg" ]] && continue
         pkg=${pkg%%:*}
-        version=$(echo "$pkg" | sed -E 's/^linux-image-(unsigned-)?//; s/-xanmod[0-9]+.*$//')
+        version=$(echo "$pkg" | sed -E 's/^linux-image-(unsigned-)?//; s/-aggressive-xanmod[0-9]+.*$//; s/-xanmod[0-9]+.*$//')
         printf '%s\t%s\n' "$(version_sort_key "$version")" "$version"
-    done < <(get_installed_packages) | sort -r | cut -f2 | head -n 1
+    done < <(get_installed_packages "$profile") | sort -r | cut -f2 | head -n 1
     return 0
 }
 
@@ -79,7 +85,8 @@ normalize_version() {
 
 # 版本排序键: 7.0.2 > 7.0.2-rc1
 version_sort_key() {
-    local tag="${1#x86_64-}"
+    local tag="${1#aggressive-}"
+    tag="${tag#x86_64-}"
     tag="${tag#arm64-}"
     tag=$(normalize_version "$tag")
     if [[ "$tag" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-rc([0-9]+))?$ ]]; then
@@ -120,8 +127,22 @@ get_arch_filter() {
     [[ "$ARCH" == "aarch64" ]] && echo "arm64" || echo "x86_64"
 }
 
+get_release_prefix() {
+    local profile="${1:-standard}" arch_filter
+    arch_filter=$(get_arch_filter)
+    if [[ "$profile" == "aggressive" ]]; then
+        if [[ "$arch_filter" != "x86_64" ]]; then
+            echo -e "\033[31m激进版目前仅支持 x86_64\033[0m" >&2
+            return 1
+        fi
+        printf 'aggressive-%s\n' "$arch_filter"
+    else
+        printf '%s\n' "$arch_filter"
+    fi
+}
+
 download_and_install() {
-    local tag="$1" release_data="$2"
+    local tag="$1" release_data="$2" profile="${3:-standard}"
     local urls url deb package_name pkg pkg_name running_kernel keep downloaded=0
     local -a old_pkgs=() image_pkgs=() remove_pkgs=()
     urls=$(echo "$release_data" | jq -r --arg tag "$tag" \
@@ -156,7 +177,14 @@ download_and_install() {
         fi
         case "$package_name" in
             linux-image-*-dbg) ;;
-            linux-image-*) image_pkgs+=("$package_name") ;;
+            linux-image-*)
+                if [[ "$profile" == "aggressive" && ! "$package_name" =~ -aggressive-xanmod[0-9]+$ ]] || \
+                   [[ "$profile" == "standard" && "$package_name" =~ -aggressive-xanmod[0-9]+$ ]]; then
+                    echo -e "\033[31m内核镜像与选择的配置不匹配，保留当前已安装内核\033[0m"
+                    return 1
+                fi
+                image_pkgs+=("$package_name")
+                ;;
         esac
     done
     if [[ ${#image_pkgs[@]} -eq 0 ]]; then
@@ -165,7 +193,7 @@ download_and_install() {
     fi
 
     # 先记录旧包；新包安装成功前绝不删除它们。
-    mapfile -t old_pkgs < <(get_installed_packages)
+    mapfile -t old_pkgs < <(get_installed_packages "$profile")
 
     echo -e "\033[36m安装内核...\033[0m"
     if ! "${SUDO[@]}" dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
@@ -192,12 +220,13 @@ download_and_install() {
     fi
 
     echo -e "\033[1;32m━━━━━━ 安装完成 ━━━━━━\033[0m"
-    local installed_tag="${tag#x86_64-}"
+    local installed_tag="${tag#aggressive-}"
+    installed_tag="${installed_tag#x86_64-}"
     installed_tag="${installed_tag#arm64-}"
     local current_algo current_qdisc
     current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
     current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
-    echo -e "\033[36m  新内核: \033[1;32m$(normalize_version "$installed_tag")\033[0m"
+    echo -e "\033[36m  新内核: \033[1;32m$(normalize_version "$installed_tag") ($profile)\033[0m"
     echo -e "\033[36m  当前拥塞控制: \033[1;32m${current_algo:-未知}  队列: \033[1;32m${current_qdisc:-未知}\033[0m"
     echo -e "\033[36m  安装未修改网络配置；可在菜单中手动启用 BBR\033[0m"
     echo -e "\033[33m  ⚠ 使用该内核需要重启；安装旧版时请确认 GRUB 选择的版本\033[0m"
@@ -275,18 +304,23 @@ do_enable_bbr() {
 }
 
 do_install_latest() {
+    local profile="${1:-standard}"
     echo -e "\033[36m获取最新版本...\033[0m"
     local data arch_filter tags latest_tag
+    arch_filter=$(get_release_prefix "$profile") || return 1
     data=$(fetch_releases) || return 1
-    arch_filter=$(get_arch_filter)
-    tags=$(echo "$data" | jq -r --arg f "$arch_filter" '.[] | select(.tag_name | startswith($f)) | .tag_name')
-    [[ -z "$tags" ]] && { echo -e "\033[31m未找到可用版本\033[0m"; return 1; }
+    tags=$(echo "$data" | jq -r --arg f "${arch_filter}-" '.[] | select(.tag_name | startswith($f)) | .tag_name')
+    if [[ -z "$tags" ]]; then
+        echo -e "\033[31m未找到 $profile 配置的可用版本\033[0m"
+        [[ "$profile" == "aggressive" ]] && echo -e "\033[33m请先运行 GitHub Actions 的激进版构建并发布 Release\033[0m"
+        return 1
+    fi
     tags=$(sort_tags_desc "$tags")
     latest_tag=$(echo "$tags" | head -1)
 
     local version="${latest_tag#"$arch_filter"-}"
     local installed
-    installed=$(get_installed_version)
+    installed=$(get_installed_version "$profile")
     echo -e "\033[36m最新版本: \033[1;32m$version\033[0m  已安装: \033[1;32m${installed:-无}\033[0m"
 
     if [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" ]]; then
@@ -297,20 +331,25 @@ do_install_latest() {
         [[ "$ans" != "y" && "$ans" != "Y" ]] && return 0
     fi
 
-    download_and_install "$latest_tag" "$data"
+    download_and_install "$latest_tag" "$data" "$profile"
 }
 
 do_install_specific() {
+    local profile="${1:-standard}"
     echo -e "\033[36m获取可用版本...\033[0m"
     local data arch_filter tags
+    arch_filter=$(get_release_prefix "$profile") || return 1
     data=$(fetch_releases) || return 1
-    arch_filter=$(get_arch_filter)
-    tags=$(echo "$data" | jq -r --arg f "$arch_filter" '.[] | select(.tag_name | startswith($f)) | .tag_name')
-    [[ -z "$tags" ]] && { echo -e "\033[31m未找到可用版本\033[0m"; return 1; }
+    tags=$(echo "$data" | jq -r --arg f "${arch_filter}-" '.[] | select(.tag_name | startswith($f)) | .tag_name')
+    if [[ -z "$tags" ]]; then
+        echo -e "\033[31m未找到 $profile 配置的可用版本\033[0m"
+        [[ "$profile" == "aggressive" ]] && echo -e "\033[33m请先运行 GitHub Actions 的激进版构建并发布 Release\033[0m"
+        return 1
+    fi
     tags=$(sort_tags_desc "$tags")
 
     local installed
-    installed=$(get_installed_version)
+    installed=$(get_installed_version "$profile")
     echo ""
     local i=0
     while IFS= read -r tag; do
@@ -334,20 +373,28 @@ do_install_specific() {
     [[ -z "$selected_tag" ]] && { echo -e "\033[31m无效编号\033[0m"; return 1; }
 
     echo -e "\033[36m已选择: \033[1;32m${selected_tag#"$arch_filter"-}\033[0m"
-    download_and_install "$selected_tag" "$data"
+    download_and_install "$selected_tag" "$data" "$profile"
 }
 
 do_check_status() {
     echo ""
-    local installed running running_version
-    installed=$(get_installed_version)
+    local installed aggressive running running_version active_installed
+    installed=$(get_installed_version standard)
+    aggressive=$(get_installed_version aggressive)
     running=$(uname -r)
     running_version=${running%%-xanmod*}
+    running_version=${running_version%-aggressive}
 
     echo -e "\033[34m  ┌─\033[1;34m 📋 内核信息\033[0m"
-    if [[ -n "$installed" ]]; then
-        echo -e "\033[34m  │\033[0m    \033[36m已安装: \033[1;32m$installed\033[0m"
-        if [[ "$running" == *"$KERNEL_BRAND"* && "$(normalize_version "$running_version")" == "$(normalize_version "$installed")" ]]; then
+    if [[ -n "$installed" || -n "$aggressive" ]]; then
+        [[ -n "$installed" ]] && echo -e "\033[34m  │\033[0m    \033[36m已安装: \033[1;32m$installed\033[0m"
+        [[ -n "$aggressive" ]] && echo -e "\033[34m  │\033[0m    \033[36m激进版: \033[1;32m$aggressive\033[0m"
+        if [[ "$running" =~ -aggressive-xanmod[0-9]+$ ]]; then
+            active_installed="$aggressive"
+        else
+            active_installed="$installed"
+        fi
+        if [[ "$running" == *"$KERNEL_BRAND"* && -n "$active_installed" && "$(normalize_version "$running_version")" == "$(normalize_version "$active_installed")" ]]; then
             echo -e "\033[34m  │\033[0m    \033[36m运行中: \033[1;32m$running ✔\033[0m"
         else
             echo -e "\033[34m  │\033[0m    \033[33m运行中: $running（需重启）\033[0m"
@@ -380,10 +427,11 @@ do_check_status() {
 }
 
 do_uninstall() {
+    local profile="${1:-standard}" other_profile
     local -a pkgs=()
-    mapfile -t pkgs < <(get_installed_packages)
+    mapfile -t pkgs < <(get_installed_packages "$profile")
     if [[ ${#pkgs[@]} -eq 0 ]]; then
-        echo -e "\033[33m未找到已安装的优化内核\033[0m"
+        echo -e "\033[33m未找到已安装的 $profile 配置内核\033[0m"
         return
     fi
     echo -e "\033[36m将卸载: \033[33m${pkgs[*]}\033[0m"
@@ -391,7 +439,12 @@ do_uninstall() {
         echo -e "\033[31m卸载失败，已保留 BBR 配置\033[0m"
         return 1
     fi
-    "${SUDO[@]}" rm -f "$SYSCTL_CONF" || echo -e "\033[33m无法删除 BBR 配置，请手动处理\033[0m"
+    if [[ "$profile" == "aggressive" ]]; then other_profile=standard; else other_profile=aggressive; fi
+    if [[ -z "$(get_installed_packages "$other_profile")" ]]; then
+        "${SUDO[@]}" rm -f "$SYSCTL_CONF" || echo -e "\033[33m无法删除 BBR 配置，请手动处理\033[0m"
+    else
+        echo -e "\033[36m另一个配置仍已安装，保留共享的 BBR 配置\033[0m"
+    fi
     echo -e "\033[1;32m已卸载，请重启系统\033[0m"
 }
 
@@ -406,19 +459,24 @@ while true; do
     echo ""
 
     # 状态栏
-    local_ver=$(get_installed_version)
+    local_ver=$(get_installed_version standard)
+    aggressive_ver=$(get_installed_version aggressive)
     cur_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
     cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
     echo -e "\033[36m  内核: \033[1;32m${local_ver:-未安装}\033[0m  拥塞: \033[1;32m$cur_algo\033[0m  队列: \033[1;32m$cur_qdisc\033[0m"
+    [[ -n "$aggressive_ver" ]] && echo -e "\033[36m  激进版: \033[1;32m$aggressive_ver\033[0m"
     echo ""
-    echo -e "  \033[33m1.\033[0m 安装/更新到最新版本"
-    echo -e "  \033[33m2.\033[0m 手动选择版本安装"
+    echo -e "  \033[33m1.\033[0m 安装/更新标准版到最新版本"
+    echo -e "  \033[33m2.\033[0m 手动选择标准版版本"
     echo -e "  \033[33m3.\033[0m 查看内核与 BBR 状态"
-    echo -e "  \033[33m4.\033[0m 卸载优化内核"
+    echo -e "  \033[33m4.\033[0m 卸载标准版内核"
     echo -e "  \033[33m5.\033[0m 手动启用 BBR（保存配置）"
+    echo -e "  \033[33m6.\033[0m 安装/更新激进版（实验性）"
+    echo -e "  \033[33m7.\033[0m 选择激进版版本安装"
+    echo -e "  \033[33m8.\033[0m 卸载激进版内核"
     echo -e "  \033[33m0.\033[0m 退出"
     echo ""
-    echo -n -e "\033[36m选择 (0-5): \033[0m"
+    echo -n -e "\033[36m选择 (0-8): \033[0m"
     if ! read -r action; then
         echo ""
         exit 0
@@ -431,6 +489,9 @@ while true; do
         3) do_check_status ;;
         4) do_uninstall ;;
         5) do_enable_bbr ;;
+        6) do_install_latest aggressive ;;
+        7) do_install_specific aggressive ;;
+        8) do_uninstall aggressive ;;
         *) echo -e "\033[31m无效选择\033[0m" ;;
     esac
 

@@ -31,6 +31,30 @@ XanMod GitLab → GitHub Actions → GCC 16 + ccache → VPS config → .deb →
 `optimize-config.ps1` 是单独运行的配置优化工具，不是构建工作流的必经步骤。
 `CompatibilityTest.yml` 用于测试 Google BBRv3 源码与 mainline、stable 内核的兼容性。
 
+## 实验性激进版
+
+激进版是独立的 x86_64 内核：使用 `x86-64-aggressive.config`，构建时在 XanMod 自带的 BBRv3 源码上应用以下参数：
+
+| 参数 | 标准版 | 激进版 |
+|---|---|---|
+| STARTUP 发送速率增益 | 约 2.77× | 3.0× |
+| PROBE_BW 巡航增益 | 1.0× | 约 1.2× |
+| BBR 内部丢包阈值 | 2% | 25% |
+| 因丢包提前退出 STARTUP | 启用 | 禁用 |
+
+25% 是 BBR 内部判断采样的阈值，**不是**保证网络可以承受的物理丢包率。ECN 和其他丢包恢复机制仍保留；
+激进参数可能增加重传、排队延迟和对共享链路上其他流量的影响，不保证高丢包场景一定更快。
+
+在 GitHub Actions 手动运行“构建实验性激进 BBRv3 内核”后，产物发布到单独的
+`aggressive-x86_64-<版本>` Release，内核版本采用如 `7.3.0-aggressive-xanmod1` 的独立标识。运行一键安装脚本后：
+
+- 菜单 **6** 安装或更新激进版，菜单 **7** 选择激进版版本，菜单 **8** 卸载激进版。
+- 菜单 **1、2、4** 仍管理标准版，菜单 **3** 查看两种内核状态；两种内核不会在升级时互相清理。
+- 安装不会改写网络配置。如果 Skyline 等服务正在管理拥塞算法，菜单 **5** 会保留现有设置。
+- 重启后用 `uname -r` 确认当前版本；可通过 GRUB 的高级选项选择标准版作为回退。
+
+激进构建遇到不匹配的上游 BBRv3 源码时会停止，避免发布只应用了部分参数的内核。
+
 ## 环境要求
 
 - **架构**: x86_64
@@ -57,9 +81,32 @@ XanMod GitLab → GitHub Actions → GCC 16 + ccache → VPS config → .deb →
 ```bash
 bash tests/installer_test.sh
 python3 tests/compatibility_workflow_test.py
+python3 tests/test_aggressive_profile.py
+python3 tests/test_build_profiles.py
 ```
 
 这些测试不会安装或卸载内核，也不会修改系统网络配置。GitHub Actions 会在相关文件发生变更时运行测试。
+
+### 隔离丢包试验
+
+`tests/bench-bbr-loss.sh` 使用临时网络命名空间和 veth，在独立的中间路由器设置双向 100 Mbit/s、各方向 50 ms 延迟，
+并关闭网卡聚合；它覆盖单向 30%/50% 丢包，以及双向合成约 30%/50% 丢包。
+测试需要 root、`ip`、`tc`、`ethtool`、`iperf3` 和 `ping`，且不能应用在生产网卡上。
+
+要在**标准版内核**上与激进参数对照，可从与当前内核完全匹配的 XanMod 源码取出
+`net/ipv4/tcp_bbr.c` 和 `net/ipv4/tcp_dctcp.h`，并安装当前内核的 headers，然后运行：
+
+```bash
+sudo bash tests/build-bbraggr-module.sh /path/to/tcp_bbr.c /path/to/tcp_dctcp.h /tmp/bbraggr-module
+sudo insmod /tmp/bbraggr-module/tcp_bbr_aggr.ko
+sudo bash tests/bench-bbr-loss.sh
+sudo rmmod tcp_bbr_aggr
+```
+
+比较模块名为 `bbraggr`，只供单个测试连接选择，不会切换主机默认算法。测试结果包含 `iperf3` JSON、
+队列统计和失败状态；短时合成测试不能替代真实网络长期观察。`BENCH_SECONDS`、`BENCH_REPEATS` 和
+`BENCH_OUTPUT` 可调整测试时长、重复次数和结果目录；`BENCH_SHARED=1` 会额外测试两种算法同时共享瓶颈。
+运行 `python3 tests/summarize-bbr-loss.py <结果目录>` 可以汇总接收端吞吐和重传。
 
 ## FAQ
 

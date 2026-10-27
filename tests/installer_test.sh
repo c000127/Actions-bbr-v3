@@ -46,7 +46,7 @@ case "$cmd" in
         printf '%s\n' "${package%%_*}"
         ;;
     uname)
-        [[ ${1:-} == -m ]] && { echo x86_64; exit 0; }
+        [[ ${1:-} == -m ]] && { echo "${TEST_ARCH:-x86_64}"; exit 0; }
         [[ ${1:-} == -r ]] && { echo "$TEST_RUNNING"; exit 0; }
         exit 1
         ;;
@@ -55,7 +55,14 @@ case "$cmd" in
         case "$*" in
             *'type == "array"'*) exit 0 ;;
             *'.assets[]'*) cat "$TEST_URLS" ;;
-            *'startswith'*) cat "$TEST_TAGS" ;;
+            *'startswith'*)
+                prefix=
+                while [[ $# -gt 0 ]]; do
+                    if [[ $1 == --arg && ${2:-} == f ]]; then prefix=${3:-}; break; fi
+                    shift
+                done
+                awk -v prefix="$prefix" 'index($0, prefix) == 1' "$TEST_TAGS"
+                ;;
             *) echo "Unexpected jq invocation: $*" >&2; exit 1 ;;
         esac
         ;;
@@ -144,7 +151,7 @@ reset_fixture() {
         'https://example.test/linux-headers-7.2.12-xanmod1_1_amd64.deb' > "$TEST_URLS"
     TEST_RUNNING=7.2.1-xanmod1
     rm -f "$BBRV3_SYSCTL_CONF" "$TEST_DIR/algorithm" "$TEST_DIR/tee-content"
-    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE
+    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_ARCH
 }
 
 run_installer() {
@@ -222,6 +229,63 @@ run_installer '1\nn\n\n0\n'
 assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.0-xanmod1:amd64'
 assert_log_not_contains 'linux-image-7.2.1-xanmod1:amd64'
 echo 'PASS: architecture-qualified running packages are retained'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.0-xanmod1 linux-image-7.1.9-aggressive-xanmod1 > "$TEST_PACKAGES"
+run_installer '1\nn\n\n0\n'
+assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.0-xanmod1'
+assert_log_not_contains 'linux-image-7.1.9-aggressive-xanmod1'
+echo 'PASS: standard upgrades do not remove the separate aggressive kernel'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.1.9-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' x86_64-7.2.12 aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' \
+    'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' \
+    'https://example.test/linux-headers-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+run_installer '6\nn\n\n0\n'
+assert_log_contains 'linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb'
+assert_log_contains 'apt-get remove --purge -y -- linux-image-7.1.9-aggressive-xanmod1'
+assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
+assert_log_not_contains 'sysctl -w'
+assert_log_not_contains 'tee '
+echo 'PASS: aggressive upgrades select their own release and preserve the standard kernel'
+
+reset_fixture
+printf '%s\n' aggressive-x86_64-7.2.9 aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+run_installer '7\n1\nn\n\n0\n'
+assert_output_contains '已选择:'
+assert_output_contains '7.2.12'
+assert_log_contains 'dpkg -i '
+echo 'PASS: the aggressive version selector sorts and installs its own releases'
+
+reset_fixture
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+run_installer '6\n\n0\n'
+assert_output_contains '内核镜像与选择的配置不匹配'
+assert_log_not_contains 'dpkg -i'
+echo 'PASS: an aggressive release containing a standard image is rejected'
+
+reset_fixture
+printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+run_installer '1\n\n0\n'
+assert_output_contains '内核镜像与选择的配置不匹配'
+assert_log_not_contains 'dpkg -i'
+echo 'PASS: a standard release containing an aggressive image is rejected'
+
+reset_fixture
+run_installer '6\n\n0\n'
+assert_output_contains '未找到 aggressive 配置的可用版本'
+assert_log_not_contains 'dpkg -i'
+echo 'PASS: an unpublished aggressive release is reported without affecting standard releases'
+
+reset_fixture
+export TEST_ARCH=aarch64
+run_installer '6\n\n0\n'
+assert_output_contains '激进版目前仅支持 x86_64'
+assert_log_not_contains 'dpkg -i'
+echo 'PASS: unsupported aggressive architectures are rejected'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"
@@ -327,6 +391,14 @@ assert_output_contains '卸载失败'
 echo 'PASS: failed uninstall preserves the configuration and reports failure'
 
 reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+run_installer '8\n\n0\n'
+assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.12-aggressive-xanmod1'
+assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
+assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
+echo 'PASS: aggressive uninstall preserves the standard kernel and shared configuration'
+
+reset_fixture
 export TEST_MISSING_DEP=1 TEST_APT_UPDATE_FAIL=1
 if run_installer ''; then
     echo 'Expected dependency installation failure to terminate the installer' >&2
@@ -355,6 +427,14 @@ export TEST_RUNNING=7.3.0-xanmod1 TEST_BBR_VERSION=3
 run_installer '3\n\n0\n'
 assert_output_contains 'v3（已启用）'
 echo 'PASS: status reports BBRv3 when it is the active congestion algorithm'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-xanmod1 linux-image-7.3.0-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_BBR_VERSION=3
+run_installer '3\n\n0\n'
+assert_output_contains '激进版:'
+assert_output_contains '7.3.0-aggressive-xanmod1'
+echo 'PASS: status recognizes the separately installed running aggressive kernel'
 
 reset_fixture
 if ! run_installer ''; then

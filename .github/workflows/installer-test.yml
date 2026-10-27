@@ -7,14 +7,32 @@ on:
       - install.sh
       - tests/installer_test.sh
       - tests/compatibility_workflow_test.py
+      - tests/test_aggressive_profile.py
+      - tests/test_build_profiles.py
+      - tests/bench-bbr-loss.sh
+      - tests/build-bbraggr-module.sh
+      - tests/summarize-bbr-loss.py
+      - scripts/apply-aggressive-bbr.py
       - .github/workflows/CompatibilityTest.yml
+      - .github/workflows/build.yml
+      - .github/workflows/build-aggressive.yml
+      - x86-64-aggressive.config
       - .github/workflows/installer-test.yml
   pull_request:
     paths:
       - install.sh
       - tests/installer_test.sh
       - tests/compatibility_workflow_test.py
+      - tests/test_aggressive_profile.py
+      - tests/test_build_profiles.py
+      - tests/bench-bbr-loss.sh
+      - tests/build-bbraggr-module.sh
+      - tests/summarize-bbr-loss.py
+      - scripts/apply-aggressive-bbr.py
       - .github/workflows/CompatibilityTest.yml
+      - .github/workflows/build.yml
+      - .github/workflows/build-aggressive.yml
+      - x86-64-aggressive.config
       - .github/workflows/installer-test.yml
 
 permissions:
@@ -29,5 +47,9 @@ jobs:
         run: |
           bash -n install.sh
           bash -n tests/installer_test.sh
+          bash -n tests/bench-bbr-loss.sh
+          bash -n tests/build-bbraggr-module.sh
           bash tests/installer_test.sh
           python3 tests/compatibility_workflow_test.py
+          python3 tests/test_aggressive_profile.py
+          python3 tests/test_build_profiles.py

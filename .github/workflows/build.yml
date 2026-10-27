@@ -2,6 +2,28 @@ name: 构建 VPS 优化的 BBRv3 内核（XanMod）
 
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: 内核配置
+        type: choice
+        options: [standard, aggressive]
+        default: standard
+      publish:
+        description: 发布 GitHub Release
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      profile:
+        description: standard or aggressive
+        required: false
+        default: standard
+        type: string
+      publish:
+        description: Publish a GitHub release
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -21,22 +43,25 @@ jobs:
     env:
       ARCH: ${{ matrix.arch }}
       KERNEL_VERSION: ""
+      PROFILE: ${{ inputs.profile || 'standard' }}
     steps:
       - name: 🗑️ 释放磁盘空间 + 删除旧工作流
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache &
           # 并行删除本工作流的旧运行记录（best-effort，不阻塞构建）
           # 使用 workflow_id 筛选，避免误删其他工作流（如 build_test.yml）的记录
-          curl -sf -X GET \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/runs?per_page=50&status=completed" \
-          | jq -r '.workflow_runs[].id' 2>/dev/null | while read run_id; do
-            curl -sf -X DELETE \
+          if [ "$PROFILE" = "standard" ]; then
+            curl -sf -X GET \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${run_id}" &
-          done
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/runs?per_page=50&status=completed" \
+            | jq -r '.workflow_runs[].id' 2>/dev/null | while read run_id; do
+              curl -sf -X DELETE \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs/${run_id}" &
+            done
+          fi
           wait
           sudo apt-get clean
           df -h /
@@ -82,6 +107,23 @@ jobs:
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
           echo "XANMOD_TAG=$XANMOD_TAG" >> $GITHUB_ENV
           echo "XANMOD_BRANCH=$XANMOD_BRANCH" >> $GITHUB_ENV
+          case "$PROFILE" in
+            standard)
+              echo "RELEASE_TAG=${ARCH}-${KERNEL_VERSION}" >> "$GITHUB_ENV"
+              echo "CACHE_PREFIX=ccache-${ARCH}-${XANMOD_BRANCH}-" >> "$GITHUB_ENV"
+              echo "PROFILE_SUFFIX=" >> "$GITHUB_ENV"
+              ;;
+            aggressive)
+              if [[ "$ARCH" != "x86_64" ]]; then
+                echo "::error::激进版目前只支持 x86_64"
+                exit 1
+              fi
+              echo "RELEASE_TAG=aggressive-${ARCH}-${KERNEL_VERSION}" >> "$GITHUB_ENV"
+              echo "CACHE_PREFIX=ccache-aggressive-${ARCH}-${XANMOD_BRANCH}-" >> "$GITHUB_ENV"
+              echo "PROFILE_SUFFIX=-aggressive" >> "$GITHUB_ENV"
+              ;;
+            *) echo "::error::未知构建配置: $PROFILE"; exit 1 ;;
+          esac
           # 构建时间戳（精确到分钟），用于区分同一内核版本的多次编译
           echo "BUILD_TIMESTAMP=$(date -u +%Y%m%d%H%M)" >> $GITHUB_ENV
 
@@ -220,9 +262,9 @@ jobs:
           path: ${{ github.workspace }}/.ccache
           # 每次构建使用唯一 key（run_id + run_attempt），确保重跑也能保存新缓存
           # 恢复时按 arch+xanmod_branch 前缀匹配最近一次缓存
-          key: ccache-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ env.CACHE_PREFIX }}${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}-
+            ${{ env.CACHE_PREFIX }}
 
       - name: 🔧 配置 ccache 编译加速
         env:
@@ -305,6 +347,13 @@ jobs:
             echo "PATCH_EOF"
           } >> $GITHUB_ENV
 
+      - name: ⚡ 应用独立的激进 BBRv3 配置
+        if: env.PROFILE == 'aggressive'
+        working-directory: ./kernel/linux
+        run: |
+          set -euo pipefail
+          python3 "${{ github.workspace }}/scripts/apply-aggressive-bbr.py" net/ipv4/tcp_bbr.c
+
       - name: 🔢 更新 Makefile 版本号
         working-directory: ./kernel/linux
         run: |
@@ -325,7 +374,9 @@ jobs:
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
+          if [ "$PROFILE" = "aggressive" ]; then
+            cp "${{ github.workspace }}/x86-64-aggressive.config" .config
+          elif [ "${{ matrix.arch }}" = "arm64" ]; then
             cp ${{ github.workspace }}/arm64.config .config
           else
             cp ${{ github.workspace }}/x86-64.config .config
@@ -455,6 +506,16 @@ jobs:
             make olddefconfig
           fi
 
+          if [ "$PROFILE" = "aggressive" ]; then
+            grep -Fxq 'CONFIG_LOCALVERSION="-aggressive"' .config || { echo "::error::激进版内核标识未生效"; exit 1; }
+            grep -Fxq 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::error::激进版 BBR 未内置"; exit 1; }
+            grep -q 'BBRV3_AGGRESSIVE_PROFILE' net/ipv4/tcp_bbr.c || { echo "::error::激进版源码补丁未生效"; exit 1; }
+            # 明确 LOCALVERSION 以避免源码修改时附加 SCM 标记；XanMod 的
+            # localversion 文件随后追加 -xanmodN，故名称为 -aggressive-xanmodN。
+            KERNEL_RELEASE=$(make -s LOCALVERSION= kernelrelease)
+            [[ "$KERNEL_RELEASE" =~ -aggressive-xanmod[0-9]+$ ]] || { echo "::error::激进版内核版本标识不正确: $KERNEL_RELEASE"; exit 1; }
+          fi
+
           # 保存配置文件副本用于后续上传（bindeb-pkg 会改变目录结构）
           cp .config ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
@@ -491,7 +552,10 @@ jobs:
           BUILD_START=$(date +%s)
           # -pipe: 使用管道替代临时文件传递编译阶段数据
           # -j$(nproc): 充分利用所有 CPU 核心
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
+          if [ "$PROFILE" = "aggressive" ]; then
+            make bindeb-pkg -j$(nproc) LOCALVERSION= \
+              KCFLAGS="-pipe"
+          elif [ "${{ matrix.arch }}" = "arm64" ]; then
             make ARCH=arm64 bindeb-pkg -j$(nproc) \
               KCFLAGS="-pipe"
           else
@@ -516,18 +580,19 @@ jobs:
       - name: 📤 上传配置文件
         uses: actions/upload-artifact@v7
         with:
-          name: config-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}
+          name: config-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}${{ env.PROFILE_SUFFIX }}
           path: ${{ github.workspace }}/kernel-config-${{ matrix.arch }}
 
       - name: 📤 上传 Deb 包
         uses: actions/upload-artifact@v7
         with:
-          name: deb-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}
+          name: deb-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}${{ env.PROFILE_SUFFIX }}
           path: ./kernel/linux-*.deb
 
       - name: 🧹 清理已有 Release 资源
+        if: inputs.publish == true
         run: |
-          TAG="x86_64-${{ env.KERNEL_VERSION }}"
+          TAG="${{ env.RELEASE_TAG }}"
           RELEASE=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
@@ -543,25 +608,32 @@ jobs:
           fi
 
       - name: 🎉 发布到 GitHub Release
+        if: inputs.publish == true
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: x86_64-${{ env.KERNEL_VERSION }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: ./kernel/linux-*.deb
 
       - name: 🔄 更新 Release 说明
+        if: inputs.publish == true
         run: |
-          TAG="x86_64-${{ env.KERNEL_VERSION }}"
+          TAG="${{ env.RELEASE_TAG }}"
           RELEASE_ID=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
             | jq -r '.id')
           if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
-            BODY="## Linux ${{ env.KERNEL_VERSION }} + BBRv3
+            if [ "$PROFILE" = "aggressive" ]; then
+              VARIANT="实验性激进版：STARTUP 3.0×、CRUISE 1.2×、BBR 内部丢包阈值 25%；保留 ECN 和其他恢复机制。该阈值不保证实际丢包容忍率，可能增加重传及共享链路负载。"
+            else
+              VARIANT="BBRv3 (default) · fq · NO_HZ_IDLE · PREEMPT_LAZY · HZ=250 · ZSTD · BTF · GCC 16"
+            fi
+            BODY="## Linux ${{ env.KERNEL_VERSION }} + BBRv3${{ env.PROFILE_SUFFIX }}
 
           **XanMod** ${{ env.XANMOD_TAG }} · **x86_64** · ${{ env.BUILD_TIMESTAMP }} UTC
 
-          BBRv3 (default) · fq · NO_HZ_IDLE · PREEMPT_LAZY · HZ=250 · ZSTD · BTF · GCC 16
+          ${VARIANT}
 
           ### 安装
           \`\`\`bash
@@ -584,16 +656,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 如果 XANMOD_BRANCH 未设置，跳过清理
-          if [[ -z "${XANMOD_BRANCH:-}" ]]; then
-            echo "XANMOD_BRANCH 未设置，跳过缓存清理"
+          # 仅在构建配置与缓存前缀均已确定时清理，避免误删其他配置的缓存。
+          if [[ -z "${XANMOD_BRANCH:-}" || -z "${CACHE_PREFIX:-}" ]]; then
+            echo "缓存前缀未设置，跳过缓存清理"
             exit 0
           fi
           # 删除当前 arch+xanmod_branch 的所有旧缓存条目（排除本次即将保存的 key）
           # actions/cache 的 post-action 会在 job 结束时保存新条目
           # 避免旧条目堆积超出 GitHub Actions 10 GB 总缓存限额
-          PREFIX="ccache-${{ matrix.arch }}-${XANMOD_BRANCH}-"
-          CURRENT_KEY="ccache-${{ matrix.arch }}-${XANMOD_BRANCH}-${{ github.run_id }}-${{ github.run_attempt }}"
+          PREFIX="${CACHE_PREFIX}"
+          CURRENT_KEY="${CACHE_PREFIX}${{ github.run_id }}-${{ github.run_attempt }}"
           echo "清理缓存前缀: ${PREFIX}（保留: ${CURRENT_KEY}）"
           gh cache list --key "${PREFIX}" --json key -q '.[].key' | while read key; do
             if [ "${key}" = "${CURRENT_KEY}" ]; then

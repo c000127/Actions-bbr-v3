@@ -1,0 +1,14 @@
+name: 构建实验性激进 BBRv3 内核
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      profile: aggressive
