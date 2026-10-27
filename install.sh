@@ -162,6 +162,47 @@ profile_label() {
     if [[ "${1:-standard}" == aggressive ]]; then printf '激进版'; else printf '标准版'; fi
 }
 
+# Identify the running profile from uname, never from the newest installed image.
+running_profile() {
+    local kernel="${1:-}"
+    if [[ "$kernel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?-aggressive-xanmod[0-9]+$ ]]; then
+        printf 'aggressive'
+    elif [[ "$kernel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?-xanmod[0-9]+$ ]]; then
+        printf 'standard'
+    else
+        printf 'unknown'
+    fi
+}
+
+running_profile_description() {
+    case "$1" in
+        standard) printf '标准版（依据运行内核标识）' ;;
+        aggressive) printf '激进版（依据运行内核标识）' ;;
+        *)
+            if [[ -z "${2:-}" ]]; then
+                printf '无法识别（无法读取运行内核）'
+            else
+                printf '无法识别（运行内核不符合本项目命名）'
+            fi
+            ;;
+    esac
+}
+
+default_bbr_description() {
+    local profile="$1" algo="$2"
+    if [[ -z "$algo" ]]; then
+        printf '未知（无法读取默认拥塞算法）'
+    elif [[ "$algo" != bbr ]]; then
+        printf '未作为默认算法（当前默认 %s）' "$algo"
+    else
+        case "$profile" in
+            standard) printf '标准版 BBR（新连接默认使用，按内核标识推断）' ;;
+            aggressive) printf '激进版 BBR（新连接默认使用，按内核标识推断）' ;;
+            *) printf 'BBR 已设为默认，但无法确认标准版或激进版' ;;
+        esac
+    fi
+}
+
 sort_tags_desc() {
     while IFS= read -r tag; do
         [[ -z "$tag" ]] && continue
@@ -603,9 +644,11 @@ do_install_specific() {
 
 do_check_status() {
     echo ""
-    local running profile kernels kernel highest running_found=0 installed_found=0 newer=''
+    local running active_profile profile kernels kernel highest running_found=0 installed_found=0 newer=''
     running=$(uname -r 2>/dev/null || true)
+    active_profile=$(running_profile "$running")
     echo -e "${UI_BOLD_BLUE}  内核状态${UI_RESET}"
+    echo -e "  当前生效内核: ${UI_BOLD_GREEN}$(running_profile_description "$active_profile" "$running")${UI_RESET}"
     echo -e "  正在运行: ${UI_BOLD_GREEN}${running:-未知}${UI_RESET}"
     for profile in standard aggressive; do
         kernels=$(get_installed_kernels "$profile")
@@ -645,6 +688,7 @@ do_check_status() {
     echo ""
     echo -e "${UI_BOLD_BLUE}  网络状态${UI_RESET}"
     echo -e "  默认 TCP 拥塞控制: ${UI_BOLD_GREEN}${algo:-未知}${UI_RESET}"
+    echo -e "  BBR 生效情况: $(default_bbr_description "$active_profile" "$algo")"
     echo -e "  可用拥塞算法: ${available:-未知}"
     echo -e "  默认队列: ${qdisc:-未知}（不代表现有网卡的实际队列）"
     if [[ "$bbr_ver" == "3" && "$algo" == "bbr" ]]; then
@@ -663,6 +707,7 @@ do_check_status() {
         echo "  BBR: 当前未启用（可用状态或版本未知）"
     fi
     echo "  注：默认拥塞控制主要用于新连接，应用可为单个连接选择其他算法。"
+    echo "  内核类型依据版本标识判断；无法仅凭名称验证第三方内核的源码。"
 }
 
 do_uninstall() {
@@ -731,14 +776,22 @@ while true; do
 
     # 状态栏
     running_kernel=$(uname -r 2>/dev/null || true)
+    active_profile=$(running_profile "$running_kernel")
     local_ver=$(get_installed_kernels standard | head -n 1)
     aggressive_ver=$(get_installed_kernels aggressive | head -n 1)
     cur_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
     cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+    echo -e "  当前生效内核: ${UI_BOLD_GREEN}$(running_profile_description "$active_profile" "$running_kernel")${UI_RESET}"
     echo -e "  正在运行: ${UI_BOLD_GREEN}${running_kernel:-未知}${UI_RESET}"
     echo -e "  已安装标准版（最高）: ${local_ver:-无}"
     echo -e "  已安装激进版（最高）: ${aggressive_ver:-无}"
     echo -e "  默认 TCP 拥塞: ${cur_algo:-未知}  |  默认队列: ${cur_qdisc:-未知}"
+    echo -e "  BBR 生效情况: $(default_bbr_description "$active_profile" "$cur_algo")"
+    if [[ "$active_profile" == standard && -n "$aggressive_ver" ]]; then
+        echo -e "${UI_CYAN}  激进版已安装但未运行；切换需重启并选择激进版启动项。${UI_RESET}"
+    elif [[ "$active_profile" == aggressive && -n "$local_ver" ]]; then
+        echo -e "${UI_CYAN}  标准版已安装但未运行；切换需重启并选择标准版启动项。${UI_RESET}"
+    fi
     if command -v systemctl >/dev/null 2>&1 && \
        { systemctl is-active --quiet skyline-speederd.service || systemctl is-active --quiet skyline-speeder-enable.service; }; then
         echo -e "${UI_YELLOW}  Skyline 正在运行，安装器会保留其拥塞控制。${UI_RESET}"

@@ -89,7 +89,7 @@ case "$cmd" in
                     net.core.default_qdisc) echo "${TEST_QDISC:-fq}" ;;
                     net.ipv4.tcp_available_congestion_control) echo "${TEST_AVAILABLE:-reno cubic bbr}" ;;
                     net.ipv4.tcp_congestion_control)
-                        if [[ -f "$TEST_DIR/algorithm" ]]; then cat "$TEST_DIR/algorithm"; else echo "${TEST_ALGO:-bbr}"; fi
+                        if [[ -f "$TEST_DIR/algorithm" ]]; then cat "$TEST_DIR/algorithm"; else echo "${TEST_ALGO-bbr}"; fi
                         ;;
                 esac
                 ;;
@@ -668,6 +668,59 @@ assert_output_contains '较新版本 7.2.12-xanmod10'
 assert_output_contains '默认 TCP 拥塞控制: skyline_cc'
 assert_output_contains '默认队列: fq（不代表现有网卡的实际队列）'
 echo 'PASS: home and status distinguish running and installed revisions and label default network settings'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.3.0-xanmod1 linux-image-7.3.0-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_RUNNING=7.3.0-xanmod1 TEST_ALGO=bbr TEST_BBR_VERSION=3
+run_installer '3\n\n0\n'
+assert_output_contains '当前生效内核: 标准版（依据运行内核标识）'
+assert_output_contains 'BBR 生效情况: 标准版 BBR（新连接默认使用，按内核标识推断）'
+assert_output_contains '激进版已安装但未运行；切换需重启并选择激进版启动项'
+assert_output_not_contains '当前生效内核: 激进版'
+echo 'PASS: both profiles installed, running standard BBR is identified explicitly'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.3.0-xanmod1 linux-image-7.3.0-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=bbr TEST_BBR_VERSION=3
+run_installer '3\n\n0\n'
+assert_output_contains '当前生效内核: 激进版（依据运行内核标识）'
+assert_output_contains 'BBR 生效情况: 激进版 BBR（新连接默认使用，按内核标识推断）'
+assert_output_contains '标准版已安装但未运行；切换需重启并选择标准版启动项'
+assert_output_not_contains '当前生效内核: 标准版'
+echo 'PASS: both profiles installed, running aggressive BBR is identified explicitly'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.3.0-xanmod1 linux-image-7.3.0-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=skyline_cc TEST_SKYLINE_ACTIVE=1 TEST_BBR_VERSION=3
+run_installer '3\n\n0\n'
+assert_output_contains '当前生效内核: 激进版（依据运行内核标识）'
+assert_output_contains 'BBR 生效情况: 未作为默认算法（当前默认 skyline_cc）'
+assert_output_not_contains 'BBR 生效情况: 激进版 BBR'
+assert_log_not_contains 'sysctl -w'
+echo 'PASS: an aggressive kernel with Skyline does not claim that BBR is the default'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.3.0-xanmod1 linux-image-7.3.0-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_RUNNING=6.8.0-35-generic TEST_ALGO=bbr
+run_installer '3\n\n0\n'
+assert_output_contains '当前生效内核: 无法识别（运行内核不符合本项目命名）'
+assert_output_contains 'BBR 生效情况: BBR 已设为默认，但无法确认标准版或激进版'
+assert_output_not_contains '当前生效内核: 标准版'
+assert_output_not_contains '当前生效内核: 激进版'
+echo 'PASS: unrelated running kernels do not inherit an installed profile label'
+
+reset_fixture
+export TEST_RUNNING='' TEST_ALGO=''
+run_installer '3\n\n0\n'
+assert_output_contains '当前生效内核: 无法识别（无法读取运行内核）'
+assert_output_contains 'BBR 生效情况: 未知（无法读取默认拥塞算法）'
+echo 'PASS: missing kernel or algorithm information is reported as unknown'
+
+reset_fixture
+export TEST_RUNNING=7.3.0-rc2-xanmod3 TEST_ALGO=bbr
+run_installer '0\n'
+assert_output_contains '当前生效内核: 标准版（依据运行内核标识）'
+echo 'PASS: release-candidate kernel names identify their running profile'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.3.0-xanmod1 > "$TEST_PACKAGES"
