@@ -1,0 +1,33 @@
+name: 安装脚本与工作流测试
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - install.sh
+      - tests/installer_test.sh
+      - tests/compatibility_workflow_test.py
+      - .github/workflows/CompatibilityTest.yml
+      - .github/workflows/installer-test.yml
+  pull_request:
+    paths:
+      - install.sh
+      - tests/installer_test.sh
+      - tests/compatibility_workflow_test.py
+      - .github/workflows/CompatibilityTest.yml
+      - .github/workflows/installer-test.yml
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: 检查语法并运行隔离测试
+        run: |
+          bash -n install.sh
+          bash -n tests/installer_test.sh
+          bash tests/installer_test.sh
+          python3 tests/compatibility_workflow_test.py

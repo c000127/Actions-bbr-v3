@@ -39,34 +39,36 @@ dpkg -s initramfs-tools   &>/dev/null 2>&1 || NEED_INSTALL+=(initramfs-tools)
 
 if [[ ${#NEED_INSTALL[@]} -gt 0 ]]; then
     echo -e "\033[33m安装依赖: ${NEED_INSTALL[*]}\033[0m"
-    "${SUDO[@]}" apt-get update -qq && "${SUDO[@]}" apt-get install -y --no-install-recommends "${NEED_INSTALL[@]}"
+    if ! "${SUDO[@]}" apt-get update -qq || \
+       ! "${SUDO[@]}" apt-get install -y --no-install-recommends "${NEED_INSTALL[@]}"; then
+        echo -e "\033[31m依赖安装失败，请检查软件源和网络\033[0m" >&2
+        exit 1
+    fi
 fi
 
 # ── 常量 ──────────────────────────────────────────────────
 
 KERNEL_BRAND="xanmod"
-SYSCTL_CONF="/etc/sysctl.d/99-${KERNEL_BRAND}.conf"
-DOWNLOAD_DIR=$(mktemp -d)
+SYSCTL_CONF="${BBRV3_SYSCTL_CONF:-/etc/sysctl.d/99-${KERNEL_BRAND}.conf}"
+DOWNLOAD_DIR=$(mktemp -d) || { echo -e "\033[31m无法创建临时下载目录\033[0m" >&2; exit 1; }
 trap 'rm -rf -- "$DOWNLOAD_DIR"' EXIT
-
-# 迁移旧版配置
-OLD_CONF="/etc/sysctl.d/99-c000127-bbrv3.conf"
-[[ -f "$OLD_CONF" && "$OLD_CONF" != "$SYSCTL_CONF" ]] && "${SUDO[@]}" mv "$OLD_CONF" "$SYSCTL_CONF" 2>/dev/null
 
 # ── 工具函数 ──────────────────────────────────────────────
 
 get_installed_packages() {
-    dpkg-query -W -f='${binary:Package}\n' 'linux-image-*' 2>/dev/null \
-        | grep -F -- "$KERNEL_BRAND" || true
+    dpkg-query -W -f='${db:Status-Status}\t${binary:Package}\n' 'linux-image-*' 2>/dev/null \
+        | awk -F '\t' -v brand="$KERNEL_BRAND" \
+            '$1 == "installed" && index($2, brand) && $2 !~ /-dbg(:.*)?$/ {print $2}' || true
 }
 
 get_installed_version() {
-    local pkg
-    pkg=$(get_installed_packages | head -n 1)
-    pkg=${pkg%%:*}
-    if [[ -n "$pkg" ]]; then
-        echo "$pkg" | sed -E 's/^linux-image-//; s/-xanmod[0-9]+.*$//'
-    fi
+    local pkg version
+    while IFS= read -r pkg; do
+        [[ -z "$pkg" ]] && continue
+        pkg=${pkg%%:*}
+        version=$(echo "$pkg" | sed -E 's/^linux-image-(unsigned-)?//; s/-xanmod[0-9]+.*$//')
+        printf '%s\t%s\n' "$(version_sort_key "$version")" "$version"
+    done < <(get_installed_packages) | sort -r | cut -f2 | head -n 1
     return 0
 }
 
@@ -104,7 +106,7 @@ sort_tags_desc() {
 fetch_releases() {
     local data
     data=$(curl --fail --silent --show-error --location \
-        --retry 3 --retry-all-errors --retry-delay 2 \
+        --retry 3 --retry-delay 2 \
         --connect-timeout 15 --max-time 60 \
         "https://api.github.com/repos/c000127/Actions-bbr-v3/releases?per_page=100") || return 1
     if [[ -z "$data" ]] || ! echo "$data" | jq -e 'type == "array"' >/dev/null 2>&1; then
@@ -120,7 +122,8 @@ get_arch_filter() {
 
 download_and_install() {
     local tag="$1" release_data="$2"
-    local urls url old_pkgs downloaded=0
+    local urls url deb package_name pkg pkg_name running_kernel keep downloaded=0
+    local -a old_pkgs=() image_pkgs=() remove_pkgs=()
     urls=$(echo "$release_data" | jq -r --arg tag "$tag" \
         '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
 
@@ -145,8 +148,24 @@ download_and_install() {
         return 1
     fi
 
-    # 先记录旧包；新包安装成功前绝不删除它们，保留可启动的回退内核。
-    old_pkgs=$(get_installed_packages | tr '\n' ' ')
+    # 仅头文件等辅助包不能视为内核镜像；同时记录本次安装的包名，避免重装后误删。
+    for deb in "$DOWNLOAD_DIR"/linux-*.deb; do
+        if ! package_name=$(dpkg-deb -f "$deb" Package 2>/dev/null) || [[ -z "$package_name" ]]; then
+            echo -e "\033[31m无法读取 Debian 包信息，保留当前已安装内核\033[0m"
+            return 1
+        fi
+        case "$package_name" in
+            linux-image-*-dbg) ;;
+            linux-image-*) image_pkgs+=("$package_name") ;;
+        esac
+    done
+    if [[ ${#image_pkgs[@]} -eq 0 ]]; then
+        echo -e "\033[31m未下载到内核镜像包，保留当前已安装内核\033[0m"
+        return 1
+    fi
+
+    # 先记录旧包；新包安装成功前绝不删除它们。
+    mapfile -t old_pkgs < <(get_installed_packages)
 
     echo -e "\033[36m安装内核...\033[0m"
     if ! "${SUDO[@]}" dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
@@ -154,38 +173,106 @@ download_and_install() {
         return 1
     fi
 
-    # 新包已成功安装后再清理旧版；清理失败不影响已安装的新内核。
-    if [[ -n "$old_pkgs" ]] && ! "${SUDO[@]}" apt-get remove --purge -y -- $old_pkgs >/dev/null; then
+    # 新包安装后只清理未运行的旧版；运行中的内核和本次安装的镜像均保留。
+    if running_kernel=$(uname -r) && [[ -n "$running_kernel" ]]; then
+        for pkg in "${old_pkgs[@]}"; do
+            pkg_name=${pkg%%:*}
+            [[ "$pkg_name" == "linux-image-$running_kernel" || "$pkg_name" == "linux-image-unsigned-$running_kernel" ]] && continue
+            keep=0
+            for package_name in "${image_pkgs[@]}"; do
+                [[ "$pkg_name" == "$package_name" ]] && keep=1 && break
+            done
+            [[ $keep -eq 0 ]] && remove_pkgs+=("$pkg")
+        done
+    else
+        echo -e "\033[33m无法确定运行中的内核，跳过旧内核清理\033[0m"
+    fi
+    if [[ ${#remove_pkgs[@]} -gt 0 ]] && ! "${SUDO[@]}" apt-get remove --purge -y -- "${remove_pkgs[@]}" >/dev/null; then
         echo -e "\033[33m旧内核清理失败，请在确认新内核可启动后手动处理\033[0m"
     fi
 
-    # 自动配置 BBR + FQ
-    echo -e "\033[36m配置 BBR + FQ...\033[0m"
-    "${SUDO[@]}" sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
-    "${SUDO[@]}" sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
-    "${SUDO[@]}" sysctl -w net.ipv4.tcp_ecn=2 >/dev/null 2>&1 || true
-    "${SUDO[@]}" sysctl -w net.ipv4.tcp_fastopen=1027 >/dev/null 2>&1 || true
-
-    # 持久化配置
-    "${SUDO[@]}" tee "$SYSCTL_CONF" >/dev/null <<EOF
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.tcp_ecn=2
-net.ipv4.tcp_fastopen=1027
-EOF
-    "${SUDO[@]}" sysctl --system >/dev/null 2>&1 || true
-    "${SUDO[@]}" rm -f "/etc/modules-load.d/${KERNEL_BRAND}-qdisc.conf"
-
     echo -e "\033[1;32m━━━━━━ 安装完成 ━━━━━━\033[0m"
-    echo -e "\033[36m  新内核: \033[1;32m$(get_installed_version)\033[0m"
-    echo -e "\033[36m  拥塞控制: \033[1;32mbbr  队列: \033[1;32mfq\033[0m"
-    echo -e "\033[33m  ⚠ 需要重启生效\033[0m"
+    local installed_tag="${tag#x86_64-}"
+    installed_tag="${installed_tag#arm64-}"
+    local current_algo current_qdisc
+    current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+    current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+    echo -e "\033[36m  新内核: \033[1;32m$(normalize_version "$installed_tag")\033[0m"
+    echo -e "\033[36m  当前拥塞控制: \033[1;32m${current_algo:-未知}  队列: \033[1;32m${current_qdisc:-未知}\033[0m"
+    echo -e "\033[36m  安装未修改网络配置；可在菜单中手动启用 BBR\033[0m"
+    echo -e "\033[33m  ⚠ 使用该内核需要重启；安装旧版时请确认 GRUB 选择的版本\033[0m"
     echo -n -e "\033[36m立即重启？(y/n): \033[0m"
-    read -r ans
-    [[ "$ans" == "y" || "$ans" == "Y" ]] && "${SUDO[@]}" reboot
+    local ans
+    read -r ans || return 0
+    if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+        "${SUDO[@]}" reboot
+    fi
+    return 0
 }
 
 # ── 菜单操作 ──────────────────────────────────────────────
+
+do_enable_bbr() {
+    local current_algo available config_tmp="$DOWNLOAD_DIR/bbr-sysctl.conf"
+
+    # Skyline 会在后台选择自己的拥塞算法；即使当前暂时为 BBR，也不能覆盖它。
+    if command -v systemctl >/dev/null 2>&1 && \
+       { systemctl is-active --quiet skyline-speederd.service || \
+         systemctl is-active --quiet skyline-speeder-enable.service; }; then
+        echo -e "\033[33m检测到 Skyline Speeder 服务正在运行，保留当前拥塞控制和配置\033[0m"
+        return 0
+    fi
+
+    if ! current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) || [[ -z "$current_algo" ]]; then
+        echo -e "\033[31m无法读取当前拥塞控制，未修改配置\033[0m"
+        return 1
+    fi
+    case "$current_algo" in
+        bbr|cubic|reno) ;;
+        *)
+            echo -e "\033[33m当前使用其他拥塞算法 $current_algo，保留现有设置\033[0m"
+            return 0
+            ;;
+    esac
+
+    available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)
+    if [[ " $available " != *" bbr "* ]]; then
+        echo -e "\033[31m当前内核未提供 BBR，请在重启到新内核后重试\033[0m"
+        return 1
+    fi
+
+    # 更新项目配置时保留文件中已有的其他设置。
+    if [[ -f "$SYSCTL_CONF" ]]; then
+        if ! awk '
+            /^[[:space:]]*net[.]ipv4[.]tcp_congestion_control[[:space:]]*=/ {
+                if (!written) print "net.ipv4.tcp_congestion_control=bbr"
+                written = 1
+                next
+            }
+            { print }
+            END { if (!written) print "net.ipv4.tcp_congestion_control=bbr" }
+        ' "$SYSCTL_CONF" > "$config_tmp"; then
+            echo -e "\033[31m无法读取现有 BBR 配置，未修改拥塞控制\033[0m"
+            return 1
+        fi
+    else
+        printf '%s\n' 'net.ipv4.tcp_congestion_control=bbr' > "$config_tmp" || return 1
+    fi
+
+    if ! "${SUDO[@]}" sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+        echo -e "\033[31m无法启用 BBR，未写入持久配置\033[0m"
+        return 1
+    fi
+    if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)" != "bbr" ]]; then
+        echo -e "\033[33m拥塞控制已被其他设置覆盖，未写入持久配置\033[0m"
+        return 1
+    fi
+    if ! "${SUDO[@]}" tee "$SYSCTL_CONF" < "$config_tmp" >/dev/null; then
+        echo -e "\033[33m无法保存 BBR 配置，重启后可能需要手动配置\033[0m"
+        return 1
+    fi
+    echo -e "\033[1;32m已启用 BBR 并保存配置；队列和其他网络设置未更改\033[0m"
+}
 
 do_install_latest() {
     echo -e "\033[36m获取最新版本...\033[0m"
@@ -197,7 +284,7 @@ do_install_latest() {
     tags=$(sort_tags_desc "$tags")
     latest_tag=$(echo "$tags" | head -1)
 
-    local version="${latest_tag#${arch_filter}-}"
+    local version="${latest_tag#"$arch_filter"-}"
     local installed
     installed=$(get_installed_version)
     echo -e "\033[36m最新版本: \033[1;32m$version\033[0m  已安装: \033[1;32m${installed:-无}\033[0m"
@@ -205,7 +292,8 @@ do_install_latest() {
     if [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" ]]; then
         echo -e "\033[1;32m已是最新版本\033[0m"
         echo -n -e "\033[36m仍要重新安装？(y/n): \033[0m"
-        read -r ans
+        local ans
+        read -r ans || return 0
         [[ "$ans" != "y" && "$ans" != "Y" ]] && return 0
     fi
 
@@ -227,7 +315,7 @@ do_install_specific() {
     local i=0
     while IFS= read -r tag; do
         i=$((i+1))
-        local ver="${tag#${arch_filter}-}"
+        local ver="${tag#"$arch_filter"-}"
         if [[ -n "$installed" && "$installed" == "$(normalize_version "$ver")" ]]; then
             echo -e "\033[33m  $i. $ver \033[1;32m← 已安装\033[0m"
         else
@@ -237,7 +325,7 @@ do_install_specific() {
 
     echo ""
     echo -n -e "\033[36m选择版本编号 (0 取消): \033[0m"
-    read -r choice
+    read -r choice || return 0
     [[ "$choice" == "0" ]] && return 0
     [[ ! "$choice" =~ ^[0-9]+$ ]] && { echo -e "\033[31m无效输入\033[0m"; return 1; }
 
@@ -245,20 +333,21 @@ do_install_specific() {
     selected_tag=$(echo "$tags" | sed -n "${choice}p")
     [[ -z "$selected_tag" ]] && { echo -e "\033[31m无效编号\033[0m"; return 1; }
 
-    echo -e "\033[36m已选择: \033[1;32m${selected_tag#${arch_filter}-}\033[0m"
+    echo -e "\033[36m已选择: \033[1;32m${selected_tag#"$arch_filter"-}\033[0m"
     download_and_install "$selected_tag" "$data"
 }
 
 do_check_status() {
     echo ""
-    local installed running
+    local installed running running_version
     installed=$(get_installed_version)
     running=$(uname -r)
+    running_version=${running%%-xanmod*}
 
     echo -e "\033[34m  ┌─\033[1;34m 📋 内核信息\033[0m"
     if [[ -n "$installed" ]]; then
         echo -e "\033[34m  │\033[0m    \033[36m已安装: \033[1;32m$installed\033[0m"
-        if [[ "$running" == *"$KERNEL_BRAND"* ]]; then
+        if [[ "$running" == *"$KERNEL_BRAND"* && "$(normalize_version "$running_version")" == "$(normalize_version "$installed")" ]]; then
             echo -e "\033[34m  │\033[0m    \033[36m运行中: \033[1;32m$running ✔\033[0m"
         else
             echo -e "\033[34m  │\033[0m    \033[33m运行中: $running（需重启）\033[0m"
@@ -276,28 +365,33 @@ do_check_status() {
 
     echo -e "\033[34m  │\033[0m"
     echo -e "\033[34m  │\033[0m    \033[36m拥塞控制: \033[1;32m$algo\033[0m  队列: \033[1;32m$qdisc\033[0m"
-    if [[ "$bbr_ver" == "3" ]]; then
-        echo -e "\033[34m  └\033[0m    \033[36mBBR 版本: \033[1;32mv3 ✔\033[0m"
-    elif [[ "$algo" == "bbr" ]]; then
-        # BBR 被编译进内核时不会有独立 .ko，modinfo 无法返回版本字段。
-        echo -e "\033[34m  └\033[0m    \033[36mBBR: \033[1;32m已启用（内建，无 modinfo 版本字段）\033[0m"
+    if [[ "$bbr_ver" == "3" && "$algo" == "bbr" ]]; then
+        echo -e "\033[34m  └\033[0m    \033[36mBBR 版本: \033[1;32mv3（已启用）\033[0m"
+    elif [[ "$bbr_ver" == "3" ]]; then
+        echo -e "\033[34m  └\033[0m    \033[36mBBR 版本: \033[1;32mv3（可用，当前未启用）\033[0m"
     elif [[ -n "$bbr_ver" ]]; then
         echo -e "\033[34m  └\033[0m    \033[33mBBR 版本: $bbr_ver（非 v3）\033[0m"
+    elif [[ "$algo" == "bbr" ]]; then
+        # 内建或缺少模块信息时，不能仅凭拥塞算法名称确定 BBR 版本。
+        echo -e "\033[34m  └\033[0m    \033[36mBBR: \033[1;32m已启用（无法确定版本）\033[0m"
     else
         echo -e "\033[34m  └\033[0m    \033[33mBBR 未启用\033[0m"
     fi
 }
 
 do_uninstall() {
-    local pkgs
-    pkgs=$(get_installed_packages | tr '\n' ' ')
-    if [[ -z "$pkgs" ]]; then
+    local -a pkgs=()
+    mapfile -t pkgs < <(get_installed_packages)
+    if [[ ${#pkgs[@]} -eq 0 ]]; then
         echo -e "\033[33m未找到已安装的优化内核\033[0m"
         return
     fi
-    echo -e "\033[36m将卸载: \033[33m$pkgs\033[0m"
-    "${SUDO[@]}" apt-get remove --purge -y -- $pkgs
-    "${SUDO[@]}" rm -f "$SYSCTL_CONF"
+    echo -e "\033[36m将卸载: \033[33m${pkgs[*]}\033[0m"
+    if ! "${SUDO[@]}" apt-get remove --purge -y -- "${pkgs[@]}"; then
+        echo -e "\033[31m卸载失败，已保留 BBR 配置\033[0m"
+        return 1
+    fi
+    "${SUDO[@]}" rm -f "$SYSCTL_CONF" || echo -e "\033[33m无法删除 BBR 配置，请手动处理\033[0m"
     echo -e "\033[1;32m已卸载，请重启系统\033[0m"
 }
 
@@ -321,10 +415,14 @@ while true; do
     echo -e "  \033[33m2.\033[0m 手动选择版本安装"
     echo -e "  \033[33m3.\033[0m 查看内核与 BBR 状态"
     echo -e "  \033[33m4.\033[0m 卸载优化内核"
+    echo -e "  \033[33m5.\033[0m 手动启用 BBR（保存配置）"
     echo -e "  \033[33m0.\033[0m 退出"
     echo ""
-    echo -n -e "\033[36m选择 (0-4): \033[0m"
-    read -r action
+    echo -n -e "\033[36m选择 (0-5): \033[0m"
+    if ! read -r action; then
+        echo ""
+        exit 0
+    fi
 
     case "$action" in
         0) echo -e "\033[1;35m再见！\033[0m"; exit 0 ;;
@@ -332,10 +430,11 @@ while true; do
         2) do_install_specific ;;
         3) do_check_status ;;
         4) do_uninstall ;;
+        5) do_enable_bbr ;;
         *) echo -e "\033[31m无效选择\033[0m" ;;
     esac
 
     echo ""
     echo -n -e "\033[36m按 Enter 返回菜单...\033[0m"
-    read -r
+    read -r || exit 0
 done

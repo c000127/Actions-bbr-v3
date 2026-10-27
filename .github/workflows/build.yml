@@ -463,14 +463,14 @@ jobs:
 
           echo "=== 检查关键配置是否生效 ==="
           UNEXPECTED=0
-          grep -q 'CONFIG_KERNEL_ZSTD=y' .config || { echo "::warning::CONFIG_KERNEL_ZSTD 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_NO_HZ_IDLE=y' .config || { echo "::warning::CONFIG_NO_HZ_IDLE 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_DEBUG_INFO_BTF=y' .config || { echo "::warning::CONFIG_DEBUG_INFO_BTF 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_MODULE_COMPRESS_ZSTD=y' .config || { echo "::warning::CONFIG_MODULE_COMPRESS_ZSTD 未生效！"; UNEXPECTED=1; }
-          grep -q 'CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=y' .config || { echo "::warning::RCU_NOCB_CPU_DEFAULT_ALL 未生效！"; UNEXPECTED=1; }
+          grep -q 'CONFIG_KERNEL_ZSTD=y' .config || { echo "::warning::CONFIG_KERNEL_ZSTD 未生效！"; UNEXPECTED=$((UNEXPECTED + 1)); }
+          grep -q 'CONFIG_NO_HZ_IDLE=y' .config || { echo "::warning::CONFIG_NO_HZ_IDLE 未生效！"; UNEXPECTED=$((UNEXPECTED + 1)); }
+          grep -q 'CONFIG_BPF_JIT_ALWAYS_ON=y' .config || { echo "::warning::CONFIG_BPF_JIT_ALWAYS_ON 未生效！"; UNEXPECTED=$((UNEXPECTED + 1)); }
+          grep -q 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::warning::CONFIG_TCP_CONG_BBR 未生效！"; UNEXPECTED=$((UNEXPECTED + 1)); }
+          grep -q 'CONFIG_MICROCODE=y' .config || { echo "::warning::CONFIG_MICROCODE 未生效！"; UNEXPECTED=$((UNEXPECTED + 1)); }
+          grep -q 'CONFIG_DEBUG_INFO_BTF=y' .config || { echo "::warning::CONFIG_DEBUG_INFO_BTF 未生效！"; UNEXPECTED=$((UNEXPECTED + 1)); }
+          grep -q 'CONFIG_MODULE_COMPRESS_ZSTD=y' .config || { echo "::warning::CONFIG_MODULE_COMPRESS_ZSTD 未生效！"; UNEXPECTED=$((UNEXPECTED + 1)); }
+          grep -q 'CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=y' .config || { echo "::warning::RCU_NOCB_CPU_DEFAULT_ALL 未生效！"; UNEXPECTED=$((UNEXPECTED + 1)); }
           if [ $UNEXPECTED -eq 0 ]; then
             echo "✅ 全部关键配置验证通过"
           else

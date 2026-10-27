@@ -21,19 +21,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          # mainline
-          mainline=$(curl -sL --retry 3 https://www.kernel.org \
-            | grep -A1 -m1 "mainline:" \
-            | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?') || true
-          # stable
-          stable=$(curl -sL --retry 3 https://www.kernel.org \
-            | grep -A1 -m1 "stable:" \
-            | grep -oP '\d+\.\d+(\.\d+)?(-rc\d+)?') || true
+          # 使用 kernel.org 的结构化版本列表，避免依赖网页布局。
+          releases=$(curl -fsSL --retry 3 https://www.kernel.org/releases.json)
+          mainline=$(jq -r '[.releases[] | select(.moniker == "mainline") | .version][0] // empty' <<< "$releases")
+          stable=$(jq -r '[.releases[] | select(.moniker == "stable") | .version][0] // empty' <<< "$releases")
 
           echo "mainline: ${mainline:-获取失败}"
           echo "stable: ${stable:-获取失败}"
 
-          if [[ -z "$mainline" || -z "$stable" ]]; then
+          version_pattern='^[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?$'
+          if [[ ! "$mainline" =~ $version_pattern || ! "$stable" =~ $version_pattern ]]; then
             echo "::error::无法从 kernel.org 获取版本号"
             exit 1
           fi
@@ -61,7 +58,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # 测试结果汇总
-      RESULT_DOWNLOAD: "⏭️ 跳过"
+      RESULT_KERNEL_DOWNLOAD: "⏭️ 跳过"
+      RESULT_BBR_DOWNLOAD: "⏭️ 跳过"
+      KERNEL_SOURCE_READY: "false"
+      BBR_SOURCE_READY: "false"
       RESULT_REPLACE: "⏭️ 跳过"
       RESULT_COMPILE: "⏭️ 跳过"
       RESULT_API_CHECK: "⏭️ 跳过"
@@ -87,7 +87,7 @@ jobs:
           # 普通浅克隆（不用 --filter=blob:none，确保文件内容完整检出）
           git clone --depth=1 --single-branch --no-tags --branch "$REF" \
             "https://github.com/${{ matrix.repo }}.git" ./kernel/linux 2>&1 || {
-            echo "RESULT_DOWNLOAD=❌ 克隆失败" >> $GITHUB_ENV
+            echo "RESULT_KERNEL_DOWNLOAD=❌ 克隆失败" >> $GITHUB_ENV
             echo "OVERALL=❌ 内核源码获取失败" >> $GITHUB_ENV
             exit 0
           }
@@ -96,7 +96,7 @@ jobs:
 
           # 验证关键文件存在
           if [[ ! -f net/ipv4/tcp_bbr.c ]]; then
-            echo "RESULT_DOWNLOAD=❌ 克隆成功但 tcp_bbr.c 不存在" >> $GITHUB_ENV
+            echo "RESULT_KERNEL_DOWNLOAD=❌ 克隆成功但 tcp_bbr.c 不存在" >> $GITHUB_ENV
             echo "OVERALL=❌ 关键源文件缺失" >> $GITHUB_ENV
             exit 0
           fi
@@ -105,7 +105,8 @@ jobs:
           BBR_LINES=$(wc -l < net/ipv4/tcp_bbr.c)
           echo "内核源码下载完成: $SIZE"
           echo "tcp_bbr.c: ${BBR_LINES} 行"
-          echo "RESULT_DOWNLOAD=✅ 下载成功 ($SIZE, tcp_bbr.c: ${BBR_LINES}行)" >> $GITHUB_ENV
+          echo "RESULT_KERNEL_DOWNLOAD=✅ 下载成功 ($SIZE, tcp_bbr.c: ${BBR_LINES}行)" >> $GITHUB_ENV
+          echo "KERNEL_SOURCE_READY=true" >> $GITHUB_ENV
 
       - name: 📥 下载 Google BBRv3 源码
         id: download_bbr
@@ -118,9 +119,9 @@ jobs:
             echo "下载成功: ${LINES} 行, ${SIZE}"
 
             # 验证 BBRv3 特征
-            HAS_VERSION=$(grep -o 'BBR_VERSION' /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
-            HAS_ECN=$(grep -o 'bbr_ecn_alpha' /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
-            HAS_LOSS=$(grep -o 'bbr_loss_thresh' /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
+            HAS_VERSION=$(grep -c 'BBR_VERSION' /tmp/tcp_bbr_v3.c || true)
+            HAS_ECN=$(grep -c 'bbr_ecn_alpha' /tmp/tcp_bbr_v3.c || true)
+            HAS_LOSS=$(grep -c 'bbr_loss_thresh' /tmp/tcp_bbr_v3.c || true)
 
             echo "BBRv3 特征检测:"
             echo "  BBR_VERSION 3: $HAS_VERSION 处"
@@ -128,18 +129,20 @@ jobs:
             echo "  bbr_loss_thresh: $HAS_LOSS 处"
 
             if [[ "$HAS_ECN" -gt 0 || "$HAS_LOSS" -gt 0 ]]; then
-              echo "RESULT_DOWNLOAD=✅ 下载成功 (${LINES}行, BBRv3 特征已确认)" >> $GITHUB_ENV
+              echo "RESULT_BBR_DOWNLOAD=✅ 下载成功 (${LINES}行, BBRv3 特征已确认)" >> $GITHUB_ENV
             else
-              echo "RESULT_DOWNLOAD=⚠️ 下载成功但未检测到 BBRv3 特征" >> $GITHUB_ENV
+              echo "RESULT_BBR_DOWNLOAD=⚠️ 下载成功但未检测到 BBRv3 特征" >> $GITHUB_ENV
             fi
+            echo "BBR_SOURCE_READY=true" >> $GITHUB_ENV
           else
-            echo "RESULT_DOWNLOAD=❌ Google BBRv3 源码下载失败" >> $GITHUB_ENV
+            echo "RESULT_BBR_DOWNLOAD=❌ Google BBRv3 源码下载失败" >> $GITHUB_ENV
             echo "OVERALL=❌ BBRv3 源码获取失败" >> $GITHUB_ENV
             exit 0
           fi
 
       - name: 🔍 源码差异分析
         id: diff_analysis
+        if: env.KERNEL_SOURCE_READY == 'true' && env.BBR_SOURCE_READY == 'true'
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
@@ -156,8 +159,8 @@ jobs:
           echo "行数变化: $((V3_LINES - ORIG_LINES)) 行"
 
           # 统计差异
-          DIFF_STATS=$(diff --stat net/ipv4/tcp_bbr.c /tmp/tcp_bbr_v3.c 2>/dev/null | tail -1 || echo "无法生成差异统计")
-          echo "差异统计: $DIFF_STATS"
+          DIFF_STATS=$(git diff --no-index --stat -- net/ipv4/tcp_bbr.c /tmp/tcp_bbr_v3.c || true)
+          echo "差异统计: ${DIFF_STATS:-文件相同}"
 
           # 检查 BBRv3 新增的关键符号
           echo ""
@@ -165,8 +168,8 @@ jobs:
           for sym in bbr_ecn_alpha bbr_loss_thresh bbr_ecn_max_rtt_us bbr_bw_rtts \
                      bbr_ecnece_ecn_ce bbr_target_inflight bbr_sndbuf_expand \
                      BBR_VERSION; do
-            # grep -c 可能返回多行（二进制文件），用 grep + wc -l 替代
-            count=$(grep -o "$sym" /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
+            # grep 未找到符号时返回 1；在 pipefail 下仍应继续分析。
+            count=$({ grep -o "$sym" /tmp/tcp_bbr_v3.c || true; } | wc -l)
             if [[ "$count" -gt 0 ]]; then
               echo "  ✅ $sym ($count 处)"
             fi
@@ -177,8 +180,8 @@ jobs:
           echo "=== BBRv1 独有符号（BBRv3 中可能已移除）==="
           for sym in bbr_lt_bw_sampling bbr_lt_intvl_min_rtts bbr_lt_loss_thresh \
                      lt_is_sampling lt_bw lt_use_bw; do
-            v1_count=$(grep -o "$sym" net/ipv4/tcp_bbr.c 2>/dev/null | wc -l)
-            v3_count=$(grep -o "$sym" /tmp/tcp_bbr_v3.c 2>/dev/null | wc -l)
+            v1_count=$({ grep -o "$sym" net/ipv4/tcp_bbr.c || true; } | wc -l)
+            v3_count=$({ grep -o "$sym" /tmp/tcp_bbr_v3.c || true; } | wc -l)
             if [[ "$v1_count" -gt 0 && "$v3_count" -eq 0 ]]; then
               echo "  ⚠️ $sym (v1: $v1_count → v3: 已移除)"
             fi
@@ -188,6 +191,7 @@ jobs:
 
       - name: 🔧 替换源码并尝试编译
         id: compile_test
+        if: env.KERNEL_SOURCE_READY == 'true' && env.BBR_SOURCE_READY == 'true'
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
@@ -245,6 +249,7 @@ jobs:
 
       - name: 🔬 API 兼容性检查
         id: api_check
+        if: env.KERNEL_SOURCE_READY == 'true' && env.BBR_SOURCE_READY == 'true'
         working-directory: ./kernel/linux
         run: |
           set -euo pipefail
@@ -338,14 +343,14 @@ jobs:
           set -euo pipefail
 
           # 判断总体结果
-          if echo "${{ env.RESULT_COMPILE }}" | grep -q '✅'; then
+          if echo "${{ env.RESULT_KERNEL_DOWNLOAD }} ${{ env.RESULT_BBR_DOWNLOAD }}" | grep -q '❌'; then
+            OVERALL="❌ 源码获取失败"
+          elif echo "${{ env.RESULT_COMPILE }}" | grep -q '✅'; then
             OVERALL="✅ 完全兼容"
           elif echo "${{ env.RESULT_COMPILE }}" | grep -q '❌'; then
             OVERALL="❌ 编译失败"
           elif echo "${{ env.RESULT_API_CHECK }}" | grep -q '⚠️'; then
             OVERALL="⚠️ 存在兼容性问题"
-          elif echo "${{ env.RESULT_DOWNLOAD }}" | grep -q '❌'; then
-            OVERALL="❌ 源码获取失败"
           else
             OVERALL="⚠️ 测试未完成"
           fi
@@ -357,7 +362,8 @@ jobs:
 
           | 测试项 | 结果 |
           |--------|------|
-          | 源码下载 | ${{ env.RESULT_DOWNLOAD }} |
+          | 内核源码下载 | ${{ env.RESULT_KERNEL_DOWNLOAD }} |
+          | BBRv3 源码下载 | ${{ env.RESULT_BBR_DOWNLOAD }} |
           | 替换 & 差异分析 | ${{ env.RESULT_REPLACE }} |
           | 编译测试 (tcp_bbr.o) | ${{ env.RESULT_COMPILE }} |
           | API 兼容性检查 | ${{ env.RESULT_API_CHECK }} |
