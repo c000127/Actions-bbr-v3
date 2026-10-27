@@ -50,7 +50,10 @@ case "$cmd" in
         [[ ${1:-} == -r ]] && { echo "$TEST_RUNNING"; exit 0; }
         exit 1
         ;;
-    curl) echo '[]' ;;
+    curl)
+        [[ ${TEST_CURL_FAIL:-0} == 1 ]] && exit 22
+        echo '[]'
+        ;;
     jq)
         case "$*" in
             *'type == "array"'*) exit 0 ;;
@@ -171,7 +174,7 @@ reset_fixture() {
     TEST_RUNNING=7.2.1-xanmod1
     rm -f "$BBRV3_SYSCTL_CONF" "$TEST_DIR/algorithm" "$TEST_DIR/tee-content"
     rm -rf "$TEST_DIR/aggressive"
-    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_SYSTEMCTL_FAIL TEST_EXECUTE_START TEST_ARCH
+    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_CURL_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_SYSTEMCTL_FAIL TEST_EXECUTE_START TEST_ARCH
 }
 
 run_installer() {
@@ -193,6 +196,14 @@ assert_log_not_contains() {
 
 assert_output_contains() {
     grep -Fq -- "$1" "$TEST_DIR/output" || { echo "Missing output: $1" >&2; cat "$TEST_DIR/output" >&2; exit 1; }
+}
+
+assert_output_not_contains() {
+    if grep -Fq -- "$1" "$TEST_DIR/output"; then
+        echo "Unexpected output: $1" >&2
+        cat "$TEST_DIR/output" >&2
+        exit 1
+    fi
 }
 
 reset_fixture
@@ -246,9 +257,17 @@ printf '%s\n' \
     'https://example.test/linux-image-7.2.12-xanmod3_1_amd64.deb' \
     'https://example.test/linux-headers-7.2.12-xanmod3_1_amd64.deb' > "$TEST_URLS"
 run_installer '1\nn\n\n0\n'
-assert_output_contains '已是最新版本'
+assert_output_contains '高于 Release 的 xanmod3'
 assert_log_not_contains 'dpkg -i '
 echo 'PASS: the highest installed XanMod revision prevents an automatic downgrade'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.3.0-xanmod1 > "$TEST_PACKAGES"
+run_installer '1\nn\n\n0\n'
+assert_output_contains '已安装的 Linux 版本高于最新可用 Release'
+assert_output_contains '已取消安装'
+assert_log_not_contains 'dpkg -i '
+echo 'PASS: an older Release needs confirmation before installing over a newer Linux version'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"
@@ -266,6 +285,15 @@ assert_log_not_contains 'dpkg -i'
 echo 'PASS: manual version selection can be cancelled'
 
 reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.9-xanmod1 linux-image-7.2.12-xanmod2 > "$TEST_PACKAGES"
+printf '%s\n' x86_64-7.2.9 x86_64-7.2.12 > "$TEST_TAGS"
+run_installer '2\n0\n\n0\n'
+assert_output_contains '7.2.9 ← 已安装同一 Linux 版本（最高修订 xanmod1）'
+assert_output_contains '7.2.12 ← 已安装同一 Linux 版本（最高修订 xanmod2）'
+assert_output_contains '已取消选择'
+echo 'PASS: version selection labels each installed Linux version and its highest revision'
+
+reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.9-xanmod1 linux-image-7.2.12-xanmod1 > "$TEST_PACKAGES"
 run_installer '1\nn\n\n0\n'
 assert_output_contains '已是最新版本'
@@ -276,7 +304,7 @@ reset_fixture
 printf 'installed\t%s\n' linux-image-7.3.0-rc1-xanmod1 linux-image-7.3.0-xanmod1 > "$TEST_PACKAGES"
 printf '%s\n' x86_64-7.3 > "$TEST_TAGS"
 run_installer '1\nn\n\n0\n'
-assert_output_contains '已是最新版本'
+assert_output_contains '无法确认 XanMod 修订是否相同'
 assert_log_not_contains 'dpkg -i'
 echo 'PASS: a stable installed version sorts after its release candidate'
 
@@ -339,7 +367,7 @@ export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=reno TEST_EXECUTE_START=1
 run_installer '6\nn\n\n0\n'
 assert_log_contains "sysctl -p $BBRV3_AGGRESSIVE_CONF"
 grep -Fxq 'bbr' "$TEST_DIR/algorithm"
-assert_output_contains '当前拥塞控制:'
+assert_output_contains '当前默认拥塞控制:'
 echo 'PASS: installing on the running aggressive kernel immediately applies BBR'
 
 reset_fixture
@@ -356,7 +384,7 @@ reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
 printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
 run_installer '6\nn\n\n0\n'
-assert_output_contains '已是最新版本'
+assert_output_contains '无法确认 XanMod 修订是否相同'
 assert_log_not_contains 'dpkg -i'
 grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
 assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
@@ -438,7 +466,7 @@ echo 'PASS: a standard release containing an aggressive image is rejected'
 
 reset_fixture
 run_installer '6\n\n0\n'
-assert_output_contains '未找到 aggressive 配置的可用版本'
+assert_output_contains '未找到激进版的可用版本'
 assert_log_not_contains 'dpkg -i'
 echo 'PASS: an unpublished aggressive release is reported without affecting standard releases'
 
@@ -477,12 +505,20 @@ assert_output_contains '下载失败'
 echo 'PASS: failed downloads preserve the installed kernel'
 
 reset_fixture
+export TEST_CURL_FAIL=1
+run_installer '1\n\n0\n'
+assert_output_contains '无法查询 GitHub Release'
+assert_log_not_contains 'dpkg -i'
+echo 'PASS: release lookup failures explain where to investigate'
+
+reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"
 export TEST_DPKG_FAIL=1
 run_installer '1\n\n0\n'
 assert_log_contains 'dpkg -i '
 assert_log_not_contains 'apt-get remove'
 assert_log_not_contains 'tee '
+assert_output_contains '安装未完成，未执行旧内核清理'
 echo 'PASS: failed installation preserves the existing kernel and configuration'
 
 reset_fixture
@@ -545,16 +581,33 @@ echo 'PASS: a manual BBR persistence failure is reported'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"
+run_installer '4\n\n\n0\n'
+assert_output_contains 'linux-image-7.2.1-xanmod1（当前正在运行）'
+assert_output_contains '请先确认系统有其他可启动内核'
+assert_output_contains '已取消卸载'
+assert_log_not_contains 'apt-get remove'
+assert_log_not_contains 'rm -f'
+echo 'PASS: uninstall displays the running kernel and defaults to cancellation'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"
+run_installer '4\n'
+assert_output_contains '已取消卸载'
+assert_log_not_contains 'apt-get remove'
+echo 'PASS: end of input at the uninstall confirmation performs no removal'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"
 export TEST_APT_REMOVE_FAIL=1
-run_installer '4\n\n0\n'
+run_installer '4\ny\n\n0\n'
 assert_log_contains 'apt-get remove'
 assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
-assert_output_contains '卸载失败'
+assert_output_contains '卸载未完成'
 echo 'PASS: failed uninstall preserves the configuration and reports failure'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
-run_installer '8\n\n0\n'
+run_installer '8\ny\n\n0\n'
 assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.12-aggressive-xanmod1'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
@@ -566,7 +619,7 @@ mkdir -p "$TEST_DIR/aggressive"
 for path in "$BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_UNIT"; do
     printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$path"
 done
-run_installer '8\n\n0\n'
+run_installer '8\ny\n\n0\n'
 assert_log_contains 'systemctl disable --now xanmod-aggressive-bbr.service'
 [[ ! -e "$BBRV3_AGGRESSIVE_CONF" && ! -e "$BBRV3_AGGRESSIVE_HELPER" && ! -e "$BBRV3_AGGRESSIVE_UNIT" ]] || {
     echo 'Managed aggressive configuration was not removed' >&2; exit 1;
@@ -580,7 +633,7 @@ mkdir -p "$TEST_DIR/aggressive"
 printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$BBRV3_AGGRESSIVE_CONF"
 printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$BBRV3_AGGRESSIVE_HELPER"
 printf '%s\n' '# User replacement unit' > "$BBRV3_AGGRESSIVE_UNIT"
-run_installer '8\n\n0\n'
+run_installer '8\ny\n\n0\n'
 assert_output_contains '发现非本项目的配置，保留全部激进版配置文件'
 [[ -e "$BBRV3_AGGRESSIVE_CONF" && -e "$BBRV3_AGGRESSIVE_HELPER" && -e "$BBRV3_AGGRESSIVE_UNIT" ]] || {
     echo 'Removed files used by an unmanaged service' >&2; exit 1;
@@ -604,6 +657,19 @@ assert_output_contains '未安装优化内核'
 echo 'PASS: removed packages are not reported as installed'
 
 reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-xanmod1 linux-image-7.2.12-xanmod2 linux-image-7.2.12-xanmod10 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_RUNNING=7.2.12-xanmod2 TEST_ALGO=skyline_cc
+run_installer '3\n\n0\n'
+assert_output_contains '正在运行: 7.2.12-xanmod2'
+assert_output_contains '已安装标准版（最高）: 7.2.12-xanmod10'
+assert_output_contains '已安装激进版（最高）: 7.2.12-aggressive-xanmod1'
+assert_output_contains '7.2.12-xanmod2（正在运行）'
+assert_output_contains '较新版本 7.2.12-xanmod10'
+assert_output_contains '默认 TCP 拥塞控制: skyline_cc'
+assert_output_contains '默认队列: fq（不代表现有网卡的实际队列）'
+echo 'PASS: home and status distinguish running and installed revisions and label default network settings'
+
+reset_fixture
 printf 'installed\t%s\n' linux-image-7.3.0-xanmod1 > "$TEST_PACKAGES"
 export TEST_ALGO=skyline_cc TEST_BBR_VERSION=3
 run_installer '3\n\n0\n'
@@ -619,6 +685,13 @@ assert_output_contains 'v3（已启用）'
 echo 'PASS: status reports BBRv3 when it is the active congestion algorithm'
 
 reset_fixture
+export TEST_RUNNING=7.3.0-xanmod1 TEST_BBR_VERSION=3 TEST_ALGO=cubic TEST_AVAILABLE='reno cubic'
+run_installer '3\n\n0\n'
+assert_output_contains 'v3（模块信息；当前可用状态未知或尚未加载）'
+assert_output_not_contains 'v3（可用，当前未启用）'
+echo 'PASS: module metadata alone is not reported as an available algorithm'
+
+reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.12-xanmod1 linux-image-7.3.0-aggressive-xanmod1 > "$TEST_PACKAGES"
 export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_BBR_VERSION=3
 run_installer '3\n\n0\n'
@@ -632,3 +705,11 @@ if ! run_installer ''; then
     exit 1
 fi
 echo 'PASS: end of input exits the menu cleanly'
+
+reset_fixture
+run_installer '0\n'
+if LC_ALL=C grep -q $'\033' "$TEST_DIR/output"; then
+    echo 'Unexpected ANSI escape codes in redirected output' >&2
+    exit 1
+fi
+echo 'PASS: redirected output is readable without ANSI escape codes'
