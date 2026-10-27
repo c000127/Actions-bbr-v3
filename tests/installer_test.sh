@@ -97,11 +97,24 @@ case "$cmd" in
                     echo bbr > "$TEST_DIR/algorithm"
                 fi
                 ;;
+            -p)
+                printf 'sysctl %s\n' "$*" >> "$TEST_LOG"
+                [[ ${TEST_SYSCTL_FAIL:-0} == 1 ]] && exit 1
+                [[ -f ${2:-} ]] || exit 1
+                echo bbr > "$TEST_DIR/algorithm"
+                ;;
         esac
         exit 0
         ;;
     systemctl)
-        [[ ${TEST_SKYLINE_ACTIVE:-0} == 1 && ${1:-} == is-active ]] && exit 0
+        case ${1:-} in
+            is-active) [[ ${TEST_SKYLINE_ACTIVE:-0} == 1 ]] && exit 0; exit 3 ;;
+            daemon-reload|enable|start|disable)
+                printf 'systemctl %s\n' "$*" >> "$TEST_LOG"
+                [[ ${TEST_SYSTEMCTL_FAIL:-} == "$1" ]] && exit 1
+                exit 0
+                ;;
+        esac
         exit 3
         ;;
     modinfo)
@@ -139,6 +152,9 @@ export PATH="$TEST_DIR/bin:$PATH"
 export TEST_LOG="$TEST_DIR/commands.log" TEST_PACKAGES="$TEST_DIR/packages"
 export TEST_URLS="$TEST_DIR/urls" TEST_TAGS="$TEST_DIR/tags"
 export BBRV3_SYSCTL_CONF="$TEST_DIR/sysctl.conf"
+export BBRV3_AGGRESSIVE_CONF="$TEST_DIR/aggressive/config.conf"
+export BBRV3_AGGRESSIVE_HELPER="$TEST_DIR/aggressive/apply.sh"
+export BBRV3_AGGRESSIVE_UNIT="$TEST_DIR/aggressive/xanmod-aggressive-bbr.service"
 export TEST_RUNNING=7.2.1-xanmod1
 export TMPDIR="$TEST_DIR/tmp"
 
@@ -151,7 +167,8 @@ reset_fixture() {
         'https://example.test/linux-headers-7.2.12-xanmod1_1_amd64.deb' > "$TEST_URLS"
     TEST_RUNNING=7.2.1-xanmod1
     rm -f "$BBRV3_SYSCTL_CONF" "$TEST_DIR/algorithm" "$TEST_DIR/tee-content"
-    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_ARCH
+    rm -rf "$TEST_DIR/aggressive"
+    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_SYSTEMCTL_FAIL TEST_ARCH
 }
 
 run_installer() {
@@ -251,7 +268,75 @@ assert_output_contains '7.2.12-aggressive-xanmod1'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains 'sysctl -w'
 assert_log_not_contains 'tee '
+grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
+assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
+assert_log_contains 'systemctl start xanmod-aggressive-bbr.service'
+assert_output_contains '仅激进内核运行且无其他拥塞控制冲突时生效'
 echo 'PASS: aggressive upgrades select their own release and preserve the standard kernel'
+
+# Run the installed boot helper against independent kernel and service states.
+: > "$TEST_LOG"
+TEST_RUNNING=7.2.1-xanmod1 bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
+assert_log_not_contains 'sysctl -p'
+TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_SKYLINE_ACTIVE=1 bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
+assert_log_not_contains 'sysctl -p'
+TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=custom_cc bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
+assert_log_not_contains 'sysctl -p'
+TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=cubic bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
+assert_log_contains "sysctl -p $BBRV3_AGGRESSIVE_CONF"
+assert_log_not_contains 'net.core.default_qdisc'
+echo 'PASS: automatic BBR applies only to the aggressive kernel without a conflicting service or algorithm'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+run_installer '6\nn\n\n0\n'
+assert_output_contains '已是最新版本'
+assert_log_not_contains 'dpkg -i'
+grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
+assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
+echo 'PASS: an existing aggressive installation gains the automatic configuration without reinstalling'
+
+reset_fixture
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+mkdir -p "$TEST_DIR/aggressive"
+printf '%s\n' '# User owned configuration' > "$BBRV3_AGGRESSIVE_CONF"
+run_installer '6\nn\n\n0\n'
+assert_output_contains '配置文件已存在且不属于本项目'
+assert_output_contains '内核已安装，但自动 BBR 配置未完成'
+grep -Fxq '# User owned configuration' "$BBRV3_AGGRESSIVE_CONF"
+assert_log_not_contains 'systemctl enable'
+echo 'PASS: automatic configuration does not overwrite an unmanaged file'
+
+reset_fixture
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+mkdir -p "$TEST_DIR/aggressive"
+ln -s "$TEST_DIR/elsewhere" "$BBRV3_AGGRESSIVE_CONF"
+run_installer '6\nn\n\n0\n'
+assert_output_contains '配置路径是符号链接，未覆盖'
+[[ ! -e "$TEST_DIR/elsewhere" ]] || { echo 'Followed an unmanaged symlink' >&2; exit 1; }
+assert_log_not_contains 'systemctl enable'
+echo 'PASS: automatic configuration refuses symlink targets'
+
+reset_fixture
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+export TEST_SYSTEMCTL_FAIL=enable
+run_installer '6\nn\n\n0\n'
+assert_output_contains '内核已安装，但自动 BBR 配置未完成'
+assert_log_contains 'dpkg -i '
+echo 'PASS: failed service activation is reported without hiding successful kernel installation'
+
+reset_fixture
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+export TEST_DPKG_FAIL=1
+run_installer '6\n\n0\n'
+[[ ! -e "$BBRV3_AGGRESSIVE_CONF" ]] || { echo 'Configuration created after failed installation' >&2; exit 1; }
+assert_log_not_contains 'systemctl enable'
+echo 'PASS: failed aggressive package installation does not create or enable the configuration'
 
 reset_fixture
 printf '%s\n' aggressive-x86_64-7.2.9 aggressive-x86_64-7.2.12 > "$TEST_TAGS"
@@ -399,6 +484,20 @@ assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.12-aggressive-
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
 echo 'PASS: aggressive uninstall preserves the standard kernel and shared configuration'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+mkdir -p "$TEST_DIR/aggressive"
+for path in "$BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_UNIT"; do
+    printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$path"
+done
+run_installer '8\n\n0\n'
+assert_log_contains 'systemctl disable --now xanmod-aggressive-bbr.service'
+[[ ! -e "$BBRV3_AGGRESSIVE_CONF" && ! -e "$BBRV3_AGGRESSIVE_HELPER" && ! -e "$BBRV3_AGGRESSIVE_UNIT" ]] || {
+    echo 'Managed aggressive configuration was not removed' >&2; exit 1;
+}
+assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
+echo 'PASS: aggressive uninstall removes only its own automatic configuration'
 
 reset_fixture
 export TEST_MISSING_DEP=1 TEST_APT_UPDATE_FAIL=1

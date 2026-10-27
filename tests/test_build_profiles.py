@@ -28,7 +28,7 @@ def version_step():
 
 
 class BuildProfilesTest(unittest.TestCase):
-    def run_version_step(self, profile, arch="x86_64"):
+    def run_version_step(self, profile, arch="x86_64", requested=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             mock_bin = root / "bin"
@@ -41,10 +41,11 @@ class BuildProfilesTest(unittest.TestCase):
                 PATH=str(mock_bin) + os.pathsep + env["PATH"],
                 PROFILE=profile,
                 ARCH=arch,
+                REQUESTED_XANMOD_TAG=requested,
                 GITHUB_ENV=str(root / "github_env"),
             )
             result = subprocess.run(["bash", "-c", version_step()], env=env, text=True, capture_output=True)
-            content = (root / "github_env").read_text(encoding="utf-8")
+            content = (root / "github_env").read_text(encoding="utf-8") if (root / "github_env").exists() else ""
             values = dict(line.split("=", 1) for line in content.splitlines())
             return result, values
 
@@ -58,6 +59,18 @@ class BuildProfilesTest(unittest.TestCase):
         self.assertEqual(normal["CACHE_PREFIX"], "ccache-x86_64-7.3-")
         self.assertEqual(experimental["CACHE_PREFIX"], "ccache-aggressive-x86_64-7.3-")
         self.assertFalse(experimental["CACHE_PREFIX"].startswith(normal["CACHE_PREFIX"]))
+
+    def test_coordinator_tag_is_used_for_each_profile(self):
+        for profile in ("standard", "aggressive"):
+            result, values = self.run_version_step(profile, requested="7.2.12-xanmod2")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(values["XANMOD_TAG"], "7.2.12-xanmod2")
+            self.assertEqual(values["KERNEL_VERSION"], "7.2.12")
+
+    def test_invalid_coordinator_tag_is_rejected(self):
+        result, values = self.run_version_step("standard", requested="7.3.0-xanmod1\nOTHER=value")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("RELEASE_TAG", values)
 
     def test_aggressive_arm_build_is_rejected_before_publication(self):
         result, values = self.run_version_step("aggressive", "arm64")

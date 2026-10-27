@@ -1,0 +1,103 @@
+name: 检查上游并构建两个 BBRv3 内核
+
+on:
+  schedule:
+    # GitHub only schedules workflows on the default branch; avoid the hour boundary.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 重新构建已发布的版本
+        type: boolean
+        default: false
+      publish:
+        description: 发布 GitHub Release
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      force:
+        required: false
+        type: boolean
+        default: false
+      publish:
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: xanmod-pair-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      build_standard: ${{ steps.plan.outputs.build_standard }}
+      build_aggressive: ${{ steps.plan.outputs.build_aggressive }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 查询上游并检查两个 Release
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_BUILD: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          tag=''
+          for attempt in 1 2 3; do
+            tag=$(git -c 'versionsort.suffix=-rc' ls-remote \
+              --tags --refs --sort=-version:refname https://gitlab.com/xanmod/linux.git '*-xanmod*' \
+              | awk 'NR == 1 { sub("^refs/tags/", "", $2); tag=$2 } END { print tag }') || true
+            [[ -n "$tag" ]] && break
+            echo "上游查询失败，重试 $attempt/3" >&2
+            sleep 5
+          done
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?-xanmod[0-9]+$ ]]; then
+            echo "::error::无法取得受支持的 XanMod 标签: $tag"
+            exit 1
+          fi
+          version=${tag%-xanmod*}
+          fetch_release() {
+            local release_tag=$1 path=$2 status
+            status=$(curl --silent --show-error --location --retry 3 \
+              --connect-timeout 15 --max-time 60 -o "$path" -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}")
+            case "$status" in
+              200) ;;
+              404) printf 'null\n' > "$path" ;;
+              *) echo "::error::查询 Release $release_tag 失败 (HTTP $status)"; exit 1 ;;
+            esac
+          }
+          fetch_release "x86_64-$version" "$RUNNER_TEMP/standard-release.json"
+          fetch_release "aggressive-x86_64-$version" "$RUNNER_TEMP/aggressive-release.json"
+          args=()
+          [[ "$FORCE_BUILD" == true ]] && args+=(--force)
+          python3 scripts/plan-pair-build.py "$tag" \
+            "$RUNNER_TEMP/standard-release.json" "$RUNNER_TEMP/aggressive-release.json" \
+            "${args[@]}" | tee -a "$GITHUB_OUTPUT"
+
+  standard:
+    needs: discover
+    if: needs.discover.outputs.build_standard == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      profile: standard
+      xanmod_tag: ${{ needs.discover.outputs.tag }}
+      publish: ${{ github.event_name == 'schedule' || inputs.publish == true }}
+
+  aggressive:
+    needs: discover
+    if: needs.discover.outputs.build_aggressive == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      profile: aggressive
+      xanmod_tag: ${{ needs.discover.outputs.tag }}
+      publish: ${{ github.event_name == 'schedule' || inputs.publish == true }}

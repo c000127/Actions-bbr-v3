@@ -45,16 +45,31 @@ XanMod GitLab → GitHub Actions → GCC 16 + ccache → VPS config → .deb →
 25% 是 BBR 内部判断采样的阈值，**不是**保证网络可以承受的物理丢包率。ECN 和其他丢包恢复机制仍保留；
 激进参数可能增加重传、排队延迟和对共享链路上其他流量的影响，不保证高丢包场景一定更快。
 
-在 GitHub Actions 手动运行“构建实验性激进 BBRv3 内核”后，产物发布到单独的
+GitHub Actions 的“检查上游并构建两个 BBRv3 内核”每 6 小时检查一次 XanMod 上游，
+新版本会固定使用同一个上游标签并并行构建标准版和激进版。已完整发布的配置会跳过；某个版本缺包或
+上次构建失败时，下次检查会补齐。该工作流也可以手动运行，按需选择重新构建或只生成 Actions 产物。
+定时任务需要位于仓库默认分支，GitHub 的调度可能延迟。原有的单配置手动构建入口仍可使用。
+
+激进版产物发布到单独的
 `aggressive-x86_64-<版本>` Release，内核版本采用如 `7.3.0-aggressive-xanmod1` 的独立标识。运行一键安装脚本后：
 
 - 菜单 **6** 安装或更新激进版，菜单 **7** 选择激进版版本，菜单 **8** 卸载激进版。
 - 菜单 **1、2、4** 仍管理标准版，菜单 **3** 查看两种内核状态；两种内核不会在升级时互相清理。
-- 安装不会改写网络配置。如果 Skyline 等服务正在管理拥塞算法，菜单 **5** 会保留现有设置。
+- 安装会创建激进版专用 BBR 配置及启动服务；如果 Skyline 等服务正在管理拥塞算法，会保留现有设置。
 - 安装后 GRUB 的默认项可能仍是标准版，需在高级选项选择激进版；重启后用 `uname -r` 确认。
 - 可通过 GRUB 的高级选项选择标准版作为回退。
 
 激进构建遇到不匹配的上游 BBRv3 源码时会停止，避免发布只应用了部分参数的内核。
+
+激进版使用 `/etc/xanmod-bbr/aggressive.conf` 保存 `net.ipv4.tcp_congestion_control=bbr`。
+由于普通 `/etc/sysctl.d/` 文件对所有内核都会生效，`xanmod-aggressive-bbr.service` 负责在安装后和每次启动时检查：
+仅在正在运行激进版内核、且没有运行 Skyline 或使用其他自定义拥塞算法时应用该文件。标准内核不会被这个服务改写。
+检测到冲突时服务会跳过；冲突解除后可运行 `sudo systemctl start xanmod-aggressive-bbr.service` 重新检查。
+卸载激进版时仅移除本项目管理的激进版配置和服务，不删除其他程序的文件。
+
+内核已内置 BBRv3 并将 `fq` 设为默认队列，无需再套用大份 sysctl 参数表才能使用激进算法；
+安装器不会强制覆盖现有队列或修改现有网卡 qdisc。其他服务或系统配置可能覆盖默认值，
+请用 `sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc` 检查实际状态。
 
 ### VPS 一次性启动激进版
 
@@ -89,7 +104,7 @@ sudo grub-editenv - list
 手动安装较旧版本后，请在 GRUB 中确认选择了目标内核；默认启动项可能仍指向较新的版本。
 卸载功能会删除已安装的 XanMod 内核，使用前请确认系统还有其他可启动的内核。
 
-安装过程不会新建网络配置文件或修改当前网络参数。需要切换到 BBR 时，可在首页选择“手动启用 BBR”，
+标准版安装过程不会新建网络配置文件或修改当前网络参数。需要切换到 BBR 时，可在首页选择“手动启用 BBR”，
 该选项只修改拥塞算法并保存设置，不更改队列或其他网络参数。检测到正在运行的 Skyline Speeder 服务，
 或当前正在使用其他非默认拥塞算法时，脚本会保留现有设置。内核本身的默认值和其他系统服务仍可能影响重启后的实际状态；
 可通过菜单的状态检查，或运行 `sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc` 查看。
@@ -104,6 +119,7 @@ bash tests/installer_test.sh
 python3 tests/compatibility_workflow_test.py
 python3 tests/test_aggressive_profile.py
 python3 tests/test_build_profiles.py
+python3 tests/test_pair_build.py
 ```
 
 这些测试不会安装或卸载内核，也不会修改系统网络配置。GitHub Actions 会在相关文件发生变更时运行测试。

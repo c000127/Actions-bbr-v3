@@ -50,6 +50,10 @@ fi
 
 KERNEL_BRAND="xanmod"
 SYSCTL_CONF="${BBRV3_SYSCTL_CONF:-/etc/sysctl.d/99-${KERNEL_BRAND}.conf}"
+AGGRESSIVE_CONF="${BBRV3_AGGRESSIVE_CONF:-/etc/xanmod-bbr/aggressive.conf}"
+AGGRESSIVE_HELPER="${BBRV3_AGGRESSIVE_HELPER:-/usr/local/lib/xanmod-bbr/apply-aggressive.sh}"
+AGGRESSIVE_UNIT="${BBRV3_AGGRESSIVE_UNIT:-/etc/systemd/system/xanmod-aggressive-bbr.service}"
+AGGRESSIVE_MARKER='# Managed by Actions-bbr-v3 aggressive profile'
 DOWNLOAD_DIR=$(mktemp -d) || { echo -e "\033[31m无法创建临时下载目录\033[0m" >&2; exit 1; }
 trap 'rm -rf -- "$DOWNLOAD_DIR"' EXIT
 
@@ -141,6 +145,102 @@ get_release_prefix() {
     fi
 }
 
+configure_aggressive_bbr() {
+    local target current_algo current_qdisc
+    # Do not replace files that another administrator or program owns.
+    for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
+        if [[ -L "$target" ]]; then
+            echo -e "\033[31m配置路径是符号链接，未覆盖: $target\033[0m" >&2
+            return 1
+        fi
+        if [[ -e "$target" ]] && ! grep -Fxq "$AGGRESSIVE_MARKER" "$target"; then
+            echo -e "\033[31m配置文件已存在且不属于本项目，未覆盖: $target\033[0m" >&2
+            return 1
+        fi
+    done
+    if [[ "$AGGRESSIVE_CONF$AGGRESSIVE_HELPER" =~ [[:space:]\"\'] ]]; then
+        echo -e "\033[31m配置路径含不支持的空白或引号\033[0m" >&2
+        return 1
+    fi
+
+    cat > "$DOWNLOAD_DIR/aggressive.conf" <<'EOF'
+# Managed by Actions-bbr-v3 aggressive profile
+# Only applied when an aggressive XanMod kernel is running and no other
+# congestion-control service or custom algorithm is active.
+net.ipv4.tcp_congestion_control=bbr
+EOF
+    cat > "$DOWNLOAD_DIR/aggressive-helper" <<'EOF'
+#!/bin/bash
+# Managed by Actions-bbr-v3 aggressive profile
+set -eu
+config=${1:?missing configuration file}
+kernel=$(uname -r)
+[[ "$kernel" =~ -aggressive-xanmod[0-9]+$ ]] || exit 0
+if systemctl is-active --quiet skyline-speederd.service || \
+   systemctl is-active --quiet skyline-speeder-enable.service; then
+    echo 'Skyline is active; leaving congestion control unchanged.'
+    exit 0
+fi
+current=$(sysctl -n net.ipv4.tcp_congestion_control)
+case "$current" in
+    bbr|cubic|reno) ;;
+    *) echo "Custom congestion control $current is active; leaving it unchanged."; exit 0 ;;
+esac
+available=$(sysctl -n net.ipv4.tcp_available_congestion_control)
+if [[ " $available " != *" bbr "* ]]; then
+    echo 'BBR is unavailable; leaving congestion control unchanged.' >&2
+    exit 1
+fi
+sysctl -p "$config"
+EOF
+    cat > "$DOWNLOAD_DIR/aggressive-unit" <<EOF
+# Managed by Actions-bbr-v3 aggressive profile
+[Unit]
+Description=Apply BBR settings only on the aggressive XanMod kernel
+After=systemd-sysctl.service skyline-speederd.service skyline-speeder-enable.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $AGGRESSIVE_HELPER $AGGRESSIVE_CONF
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    if [[ ! -e "$AGGRESSIVE_CONF" ]] && \
+       ! "${SUDO[@]}" install -D -m 0644 "$DOWNLOAD_DIR/aggressive.conf" "$AGGRESSIVE_CONF"; then
+        return 1
+    fi
+    if ! "${SUDO[@]}" install -D -m 0755 "$DOWNLOAD_DIR/aggressive-helper" "$AGGRESSIVE_HELPER" || \
+       ! "${SUDO[@]}" install -D -m 0644 "$DOWNLOAD_DIR/aggressive-unit" "$AGGRESSIVE_UNIT" || \
+       ! "${SUDO[@]}" systemctl daemon-reload || \
+       ! "${SUDO[@]}" systemctl enable "${AGGRESSIVE_UNIT##*/}" || \
+       ! "${SUDO[@]}" systemctl start "${AGGRESSIVE_UNIT##*/}"; then
+        echo -e "\033[31m激进版自动 BBR 配置未能启用\033[0m" >&2
+        return 1
+    fi
+    current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+    current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+    echo -e "\033[36m  激进版 BBR 配置: $AGGRESSIVE_CONF\033[0m"
+    echo -e "\033[36m  仅激进内核运行且无其他拥塞控制冲突时生效；当前算法: ${current_algo:-未知}，队列: ${current_qdisc:-未知}\033[0m"
+    return 0
+}
+
+remove_aggressive_bbr_config() {
+    local target
+    if [[ ! -L "$AGGRESSIVE_UNIT" && -e "$AGGRESSIVE_UNIT" ]] && grep -Fxq "$AGGRESSIVE_MARKER" "$AGGRESSIVE_UNIT"; then
+        if ! "${SUDO[@]}" systemctl disable --now "${AGGRESSIVE_UNIT##*/}"; then
+            echo -e "\033[33m无法禁用激进版 BBR 服务，请手动检查\033[0m" >&2
+            return 1
+        fi
+    fi
+    for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
+        if [[ ! -L "$target" && -e "$target" ]] && grep -Fxq "$AGGRESSIVE_MARKER" "$target"; then
+            "${SUDO[@]}" rm -f -- "$target" || return 1
+        fi
+    done
+    "${SUDO[@]}" systemctl daemon-reload || return 1
+}
+
 download_and_install() {
     local tag="$1" release_data="$2" profile="${3:-standard}"
     local urls url deb package_name pkg pkg_name running_kernel keep downloaded=0
@@ -228,13 +328,16 @@ download_and_install() {
     current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
     echo -e "\033[36m  新内核: \033[1;32m$(normalize_version "$installed_tag") ($profile)\033[0m"
     echo -e "\033[36m  当前拥塞控制: \033[1;32m${current_algo:-未知}  队列: \033[1;32m${current_qdisc:-未知}\033[0m"
-    echo -e "\033[36m  安装未修改网络配置；可在菜单中手动启用 BBR\033[0m"
     if [[ "$profile" == "aggressive" ]]; then
+        if ! configure_aggressive_bbr; then
+            echo -e "\033[33m  内核已安装，但自动 BBR 配置未完成；请检查上方错误\033[0m"
+        fi
         local installed_kernel="${image_pkgs[0]#linux-image-}"
         installed_kernel="${installed_kernel#unsigned-}"
         echo -e "\033[33m  ⚠ GRUB 默认可能仍选择标准内核；请在高级选项中选择 $installed_kernel\033[0m"
         echo -e "\033[33m    VPS 无交互启动方法请参阅 README；启动后请检查一次性启动项是否清除\033[0m"
     else
+        echo -e "\033[36m  安装未修改网络配置；可在菜单中手动启用 BBR\033[0m"
         echo -e "\033[33m  ⚠ 使用该内核需要重启；安装旧版时请确认 GRUB 选择的版本\033[0m"
     fi
     echo -n -e "\033[36m立即重启？(y/n): \033[0m"
@@ -335,7 +438,12 @@ do_install_latest() {
         echo -n -e "\033[36m仍要重新安装？(y/n): \033[0m"
         local ans
         read -r ans || return 0
-        [[ "$ans" != "y" && "$ans" != "Y" ]] && return 0
+        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+            if [[ "$profile" == "aggressive" ]] && ! configure_aggressive_bbr; then
+                echo -e "\033[33m激进版已安装，但自动 BBR 配置未完成\033[0m"
+            fi
+            return 0
+        fi
     fi
 
     download_and_install "$latest_tag" "$data" "$profile"
@@ -445,6 +553,9 @@ do_uninstall() {
     if ! "${SUDO[@]}" apt-get remove --purge -y -- "${pkgs[@]}"; then
         echo -e "\033[31m卸载失败，已保留 BBR 配置\033[0m"
         return 1
+    fi
+    if [[ "$profile" == "aggressive" ]] && ! remove_aggressive_bbr_config; then
+        echo -e "\033[33m激进版配置清理不完整，请手动检查\033[0m"
     fi
     if [[ "$profile" == "aggressive" ]]; then other_profile=standard; else other_profile=aggressive; fi
     if [[ -z "$(get_installed_packages "$other_profile")" ]]; then

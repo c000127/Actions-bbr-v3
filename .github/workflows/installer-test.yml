@@ -9,13 +9,16 @@ on:
       - tests/compatibility_workflow_test.py
       - tests/test_aggressive_profile.py
       - tests/test_build_profiles.py
+      - tests/test_pair_build.py
       - tests/bench-bbr-loss.sh
       - tests/build-bbraggr-module.sh
       - tests/summarize-bbr-loss.py
       - scripts/apply-aggressive-bbr.py
+      - scripts/plan-pair-build.py
       - .github/workflows/CompatibilityTest.yml
       - .github/workflows/build.yml
       - .github/workflows/build-aggressive.yml
+      - .github/workflows/build-pair.yml
       - x86-64-aggressive.config
       - .github/workflows/installer-test.yml
   pull_request:
@@ -25,13 +28,16 @@ on:
       - tests/compatibility_workflow_test.py
       - tests/test_aggressive_profile.py
       - tests/test_build_profiles.py
+      - tests/test_pair_build.py
       - tests/bench-bbr-loss.sh
       - tests/build-bbraggr-module.sh
       - tests/summarize-bbr-loss.py
       - scripts/apply-aggressive-bbr.py
+      - scripts/plan-pair-build.py
       - .github/workflows/CompatibilityTest.yml
       - .github/workflows/build.yml
       - .github/workflows/build-aggressive.yml
+      - .github/workflows/build-pair.yml
       - x86-64-aggressive.config
       - .github/workflows/installer-test.yml
 
@@ -53,3 +59,4 @@ jobs:
           python3 tests/compatibility_workflow_test.py
           python3 tests/test_aggressive_profile.py
           python3 tests/test_build_profiles.py
+          python3 tests/test_pair_build.py
