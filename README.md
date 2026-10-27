@@ -66,6 +66,7 @@ GitHub Actions 的“检查上游并构建两个 BBRv3 内核”每 6 小时检�
 由于普通 `/etc/sysctl.d/` 文件对所有内核都会生效，`xanmod-aggressive-bbr.service` 负责在安装后和每次启动时检查：
 仅在正在运行激进版内核、且没有运行 Skyline 或使用其他自定义拥塞算法时应用该文件。标准内核不会被这个服务改写。
 检测到冲突时服务会跳过；冲突解除后可运行 `sudo systemctl start xanmod-aggressive-bbr.service` 重新检查。
+这是一次性服务，执行结束后显示 `inactive` 属正常现象；可用 `journalctl -u xanmod-aggressive-bbr.service` 查看结果。
 卸载激进版时仅移除本项目管理的激进版配置和服务，不删除其他程序的文件。
 
 内核已内置 BBRv3 并将 `fq` 设为默认队列，无需再套用大份 sysctl 参数表才能使用激进算法；
