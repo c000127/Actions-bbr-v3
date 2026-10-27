@@ -51,9 +51,30 @@ XanMod GitLab → GitHub Actions → GCC 16 + ccache → VPS config → .deb →
 - 菜单 **6** 安装或更新激进版，菜单 **7** 选择激进版版本，菜单 **8** 卸载激进版。
 - 菜单 **1、2、4** 仍管理标准版，菜单 **3** 查看两种内核状态；两种内核不会在升级时互相清理。
 - 安装不会改写网络配置。如果 Skyline 等服务正在管理拥塞算法，菜单 **5** 会保留现有设置。
-- 重启后用 `uname -r` 确认当前版本；可通过 GRUB 的高级选项选择标准版作为回退。
+- 安装后 GRUB 的默认项可能仍是标准版，需在高级选项选择激进版；重启后用 `uname -r` 确认。
+- 可通过 GRUB 的高级选项选择标准版作为回退。
 
 激进构建遇到不匹配的上游 BBRv3 源码时会停止，避免发布只应用了部分参数的内核。
+
+### VPS 一次性启动激进版
+
+如果 VPS 的默认 GRUB 项仍指向标准版，可以使用服务商控制台选择“高级选项”中的激进版内核。
+无法交互选择时，也可以在 GRUB 支持 `grub-reboot` 的系统上选择**下一次**启动项：
+
+```bash
+sudo grep -E '^submenu |^[[:space:]]*menuentry ' /boot/grub/grub.cfg
+# 从输出中找到高级选项子菜单的 ID 和激进版内核条目的 ID，然后替换下面两个占位符。
+sudo grub-reboot '子菜单ID>激进版条目ID'
+sudo reboot
+# 重新连接后确认：
+uname -r
+sudo grub-editenv - list
+```
+
+`grub-reboot` 预期只影响下一次启动，但 GRUB 必须能在启动时写入环境块才能自动清除该选择；
+某些 Btrfs 等文件系统或引导配置可能无法清除。如果启动后 `grub-editenv - list` 仍显示指向激进版的
+`next_entry`，且希望下次回到原默认项，可运行 `sudo grub-editenv - unset next_entry` 并再次检查。
+需要长期使用激进版时，请按发行版的 GRUB 文档设置默认项，并保留可用的标准内核及服务商控制台作为回退。
 
 ## 环境要求
 
@@ -107,6 +128,7 @@ sudo rmmod tcp_bbr_aggr
 队列统计和失败状态；短时合成测试不能替代真实网络长期观察。`BENCH_SECONDS`、`BENCH_REPEATS` 和
 `BENCH_OUTPUT` 可调整测试时长、重复次数和结果目录；`BENCH_SHARED=1` 会额外测试两种算法同时共享瓶颈。
 运行 `python3 tests/summarize-bbr-loss.py <结果目录>` 可以汇总接收端吞吐和重传。
+一次 VPS 的测试条件和结果见 [激进 BBRv3 隔离链路试验](docs/benchmarks/aggressive-bbrv3-2026-10-27.md)。
 
 ## FAQ
 

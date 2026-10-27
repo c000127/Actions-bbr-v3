@@ -246,6 +246,8 @@ printf '%s\n' \
 run_installer '6\nn\n\n0\n'
 assert_log_contains 'linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb'
 assert_log_contains 'apt-get remove --purge -y -- linux-image-7.1.9-aggressive-xanmod1'
+assert_output_contains 'GRUB 默认可能仍选择标准内核'
+assert_output_contains '7.2.12-aggressive-xanmod1'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains 'sysctl -w'
 assert_log_not_contains 'tee '

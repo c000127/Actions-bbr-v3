@@ -229,7 +229,14 @@ download_and_install() {
     echo -e "\033[36m  新内核: \033[1;32m$(normalize_version "$installed_tag") ($profile)\033[0m"
     echo -e "\033[36m  当前拥塞控制: \033[1;32m${current_algo:-未知}  队列: \033[1;32m${current_qdisc:-未知}\033[0m"
     echo -e "\033[36m  安装未修改网络配置；可在菜单中手动启用 BBR\033[0m"
-    echo -e "\033[33m  ⚠ 使用该内核需要重启；安装旧版时请确认 GRUB 选择的版本\033[0m"
+    if [[ "$profile" == "aggressive" ]]; then
+        local installed_kernel="${image_pkgs[0]#linux-image-}"
+        installed_kernel="${installed_kernel#unsigned-}"
+        echo -e "\033[33m  ⚠ GRUB 默认可能仍选择标准内核；请在高级选项中选择 $installed_kernel\033[0m"
+        echo -e "\033[33m    VPS 无交互启动方法请参阅 README；启动后请检查一次性启动项是否清除\033[0m"
+    else
+        echo -e "\033[33m  ⚠ 使用该内核需要重启；安装旧版时请确认 GRUB 选择的版本\033[0m"
+    fi
     echo -n -e "\033[36m立即重启？(y/n): \033[0m"
     local ans
     read -r ans || return 0
