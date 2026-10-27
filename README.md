@@ -70,11 +70,20 @@ GitHub Actions 的“检查上游并构建两个 BBRv3 内核”每 6 小时检�
 
 激进构建遇到不匹配的上游 BBRv3 源码时会停止，避免发布只应用了部分参数的内核。
 
-激进版使用 `/etc/xanmod-bbr/aggressive.conf` 保存 `net.ipv4.tcp_congestion_control=bbr`。
-由于普通 `/etc/sysctl.d/` 文件对所有内核都会生效，`xanmod-aggressive-bbr.service` 负责在安装后和每次启动时检查：
+激进版使用 `/etc/sysctl.d/99-xanmod-aggressive.profile` 保存 `net.ipv4.tcp_congestion_control=bbr`：
+
+```bash
+cd /etc/sysctl.d
+cat 99-xanmod-aggressive.profile
+```
+
+它是 sysctl 格式的配置文件，但使用 `.profile` 后缀，避免系统启动和 `sysctl --system` 将其无条件应用到所有内核。
+`xanmod-aggressive-bbr.service` 在安装后和每次启动时负责按条件加载：
 仅在正在运行激进版内核、且没有运行 Skyline 或使用其他自定义拥塞算法时应用该文件。标准内核不会被这个服务改写。
 检测到冲突时服务会跳过；冲突解除后可运行 `sudo systemctl start xanmod-aggressive-bbr.service` 重新检查。
 这是一次性服务，执行结束后显示 `inactive` 属正常现象；可用 `journalctl -u xanmod-aggressive-bbr.service` 查看结果。
+已有旧版配置 `/etc/xanmod-bbr/aggressive.conf` 时，选择菜单 **6** 并完成配置检查即可迁移；原有设置会保留。
+如果新旧配置不同，旧文件会保留供用户检查。
 卸载激进版时仅移除本项目管理的激进版配置和服务，不删除其他程序的文件。
 
 内核已内置 BBRv3 并将 `fq` 设为默认队列，无需再套用大份 sysctl 参数表才能使用激进算法；

@@ -158,7 +158,8 @@ export PATH="$TEST_DIR/bin:$PATH"
 export TEST_LOG="$TEST_DIR/commands.log" TEST_PACKAGES="$TEST_DIR/packages"
 export TEST_URLS="$TEST_DIR/urls" TEST_TAGS="$TEST_DIR/tags"
 export BBRV3_SYSCTL_CONF="$TEST_DIR/sysctl.conf"
-export BBRV3_AGGRESSIVE_CONF="$TEST_DIR/aggressive/config.conf"
+export BBRV3_AGGRESSIVE_CONF="$TEST_DIR/aggressive/config.profile"
+export BBRV3_AGGRESSIVE_LEGACY_CONF="$TEST_DIR/aggressive/legacy.conf"
 export BBRV3_AGGRESSIVE_HELPER="$TEST_DIR/aggressive/apply.sh"
 export BBRV3_AGGRESSIVE_UNIT="$TEST_DIR/aggressive/xanmod-aggressive-bbr.service"
 export TEST_RUNNING=7.2.1-xanmod1
@@ -401,6 +402,66 @@ assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
 echo 'PASS: updating the automatic service preserves an existing managed configuration'
 
 reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+mkdir -p "$TEST_DIR/aggressive"
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' 'net.ipv4.tcp_congestion_control=bbr' '# Custom note' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+run_installer '6\nn\n\n0\n'
+assert_output_contains '已将旧版激进 BBR 配置迁移至'
+grep -Fxq '# Custom note' "$BBRV3_AGGRESSIVE_CONF"
+grep -Fxq "ExecStart=/bin/bash $BBRV3_AGGRESSIVE_HELPER $BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_UNIT"
+[[ ! -e "$BBRV3_AGGRESSIVE_LEGACY_CONF" ]] || { echo 'Expected the identical old configuration to be removed after migration' >&2; exit 1; }
+echo 'PASS: managed legacy settings migrate without losing edits and the service uses the new path'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+mkdir -p "$TEST_DIR/aggressive"
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' '# Old user setting' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' '# New user setting' > "$BBRV3_AGGRESSIVE_CONF"
+run_installer '6\nn\n\n0\n'
+assert_output_contains '新旧配置内容不同，已保留旧配置供检查'
+grep -Fxq '# Old user setting' "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+grep -Fxq '# New user setting' "$BBRV3_AGGRESSIVE_CONF"
+echo 'PASS: different managed old and new configurations are both preserved'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+mkdir -p "$TEST_DIR/aggressive"
+printf '%s\n' '# User owned legacy configuration' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+run_installer '6\nn\n\n0\n'
+assert_output_contains '旧配置不属于本项目或是符号链接，将保留'
+grep -Fxq '# User owned legacy configuration' "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
+echo 'PASS: an unmanaged legacy configuration is not copied or removed'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+mkdir -p "$TEST_DIR/aggressive"
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' '# Symlink target' > "$TEST_DIR/other-config"
+ln -s "$TEST_DIR/other-config" "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+run_installer '6\nn\n\n0\n'
+assert_output_contains '旧配置不属于本项目或是符号链接，将保留'
+[[ -L "$BBRV3_AGGRESSIVE_LEGACY_CONF" ]] || { echo 'Removed a user symlink' >&2; exit 1; }
+grep -Fxq '# Symlink target' "$TEST_DIR/other-config"
+grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
+echo 'PASS: a legacy symlink and its target are not copied or removed'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+mkdir -p "$TEST_DIR/aggressive"
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' '# Old settings' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+export TEST_SYSTEMCTL_FAIL=enable
+run_installer '6\nn\n\n0\n'
+assert_output_contains '激进版已安装，但自动 BBR 配置未完成'
+grep -Fxq '# Old settings' "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+grep -Fxq '# Old settings' "$BBRV3_AGGRESSIVE_CONF"
+echo 'PASS: migration preserves the old configuration if service activation fails'
+
+reset_fixture
 printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
 printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
 mkdir -p "$TEST_DIR/aggressive"
@@ -619,13 +680,27 @@ mkdir -p "$TEST_DIR/aggressive"
 for path in "$BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_UNIT"; do
     printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$path"
 done
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
 run_installer '8\ny\n\n0\n'
 assert_log_contains 'systemctl disable --now xanmod-aggressive-bbr.service'
 [[ ! -e "$BBRV3_AGGRESSIVE_CONF" && ! -e "$BBRV3_AGGRESSIVE_HELPER" && ! -e "$BBRV3_AGGRESSIVE_UNIT" ]] || {
     echo 'Managed aggressive configuration was not removed' >&2; exit 1;
 }
+[[ ! -e "$BBRV3_AGGRESSIVE_LEGACY_CONF" ]] || { echo 'Managed legacy configuration was not removed' >&2; exit 1; }
 assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
 echo 'PASS: aggressive uninstall removes only its own automatic configuration'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+mkdir -p "$TEST_DIR/aggressive"
+for path in "$BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_UNIT"; do
+    printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$path"
+done
+printf '%s\n' '# User owned legacy configuration' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+run_installer '8\ny\n\n0\n'
+grep -Fxq '# User owned legacy configuration' "$BBRV3_AGGRESSIVE_LEGACY_CONF"
+[[ ! -e "$BBRV3_AGGRESSIVE_CONF" ]] || { echo 'Expected the managed new configuration to be removed' >&2; exit 1; }
+echo 'PASS: aggressive uninstall preserves an unmanaged legacy configuration'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"

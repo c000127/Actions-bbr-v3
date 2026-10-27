@@ -59,7 +59,8 @@ fi
 
 KERNEL_BRAND="xanmod"
 SYSCTL_CONF="${BBRV3_SYSCTL_CONF:-/etc/sysctl.d/99-${KERNEL_BRAND}.conf}"
-AGGRESSIVE_CONF="${BBRV3_AGGRESSIVE_CONF:-/etc/xanmod-bbr/aggressive.conf}"
+AGGRESSIVE_CONF="${BBRV3_AGGRESSIVE_CONF:-/etc/sysctl.d/99-xanmod-aggressive.profile}"
+AGGRESSIVE_LEGACY_CONF="${BBRV3_AGGRESSIVE_LEGACY_CONF:-/etc/xanmod-bbr/aggressive.conf}"
 AGGRESSIVE_HELPER="${BBRV3_AGGRESSIVE_HELPER:-/usr/local/lib/xanmod-bbr/apply-aggressive.sh}"
 AGGRESSIVE_UNIT="${BBRV3_AGGRESSIVE_UNIT:-/etc/systemd/system/xanmod-aggressive-bbr.service}"
 AGGRESSIVE_MARKER='# Managed by Actions-bbr-v3 aggressive profile'
@@ -247,7 +248,7 @@ get_release_prefix() {
 }
 
 configure_aggressive_bbr() {
-    local target current_algo current_qdisc running_kernel
+    local target current_algo current_qdisc running_kernel legacy_managed=0 config_source
     # Do not replace files that another administrator or program owns.
     for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
         if "${SUDO[@]}" test -L "$target"; then
@@ -262,6 +263,16 @@ configure_aggressive_bbr() {
     if [[ "$AGGRESSIVE_CONF$AGGRESSIVE_HELPER" =~ [[:space:]\"\'] ]]; then
         echo -e "${UI_RED}配置路径含不支持的空白或引号${UI_RESET}" >&2
         return 1
+    fi
+    if [[ "$AGGRESSIVE_LEGACY_CONF" != "$AGGRESSIVE_CONF" ]] && \
+       "${SUDO[@]}" test -e "$AGGRESSIVE_LEGACY_CONF"; then
+        if ! "${SUDO[@]}" test -L "$AGGRESSIVE_LEGACY_CONF" && \
+           "${SUDO[@]}" test -f "$AGGRESSIVE_LEGACY_CONF" && \
+           "${SUDO[@]}" grep -Fxq "$AGGRESSIVE_MARKER" "$AGGRESSIVE_LEGACY_CONF"; then
+            legacy_managed=1
+        else
+            echo -e "${UI_YELLOW}旧配置不属于本项目或是符号链接，将保留: $AGGRESSIVE_LEGACY_CONF${UI_RESET}" >&2
+        fi
     fi
 
     cat > "$DOWNLOAD_DIR/aggressive.conf" <<'EOF'
@@ -307,9 +318,13 @@ ExecStart=/bin/bash $AGGRESSIVE_HELPER $AGGRESSIVE_CONF
 [Install]
 WantedBy=multi-user.target
 EOF
-    if ! "${SUDO[@]}" test -e "$AGGRESSIVE_CONF" && \
-       ! "${SUDO[@]}" install -D -m 0644 "$DOWNLOAD_DIR/aggressive.conf" "$AGGRESSIVE_CONF"; then
-        return 1
+    if ! "${SUDO[@]}" test -e "$AGGRESSIVE_CONF"; then
+        config_source="$DOWNLOAD_DIR/aggressive.conf"
+        [[ "$legacy_managed" -eq 1 ]] && config_source="$AGGRESSIVE_LEGACY_CONF"
+        if ! "${SUDO[@]}" install -D -m 0644 "$config_source" "$AGGRESSIVE_CONF"; then
+            echo -e "${UI_RED}无法保存激进版 BBR 配置，旧配置将保留${UI_RESET}" >&2
+            return 1
+        fi
     fi
     if ! "${SUDO[@]}" install -D -m 0755 "$DOWNLOAD_DIR/aggressive-helper" "$AGGRESSIVE_HELPER" || \
        ! "${SUDO[@]}" install -D -m 0644 "$DOWNLOAD_DIR/aggressive-unit" "$AGGRESSIVE_UNIT" || \
@@ -319,10 +334,22 @@ EOF
         echo -e "${UI_RED}激进版自动 BBR 配置未能启用${UI_RESET}" >&2
         return 1
     fi
+    if [[ "$legacy_managed" -eq 1 ]]; then
+        if "${SUDO[@]}" cmp -s -- "$AGGRESSIVE_LEGACY_CONF" "$AGGRESSIVE_CONF"; then
+            if "${SUDO[@]}" rm -f -- "$AGGRESSIVE_LEGACY_CONF"; then
+                echo -e "${UI_CYAN}  已将旧版激进 BBR 配置迁移至 $AGGRESSIVE_CONF${UI_RESET}"
+            else
+                echo -e "${UI_YELLOW}  新配置已保存，旧配置无法删除，请手动检查: $AGGRESSIVE_LEGACY_CONF${UI_RESET}" >&2
+            fi
+        else
+            echo -e "${UI_YELLOW}  新旧配置内容不同，已保留旧配置供检查: $AGGRESSIVE_LEGACY_CONF${UI_RESET}" >&2
+        fi
+    fi
     current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
     current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
     running_kernel=$(uname -r 2>/dev/null || true)
     echo -e "${UI_CYAN}  激进版 BBR 配置: $AGGRESSIVE_CONF${UI_RESET}"
+    echo -e "${UI_CYAN}  .profile 由激进版服务按条件加载，不会被 sysctl --system 无条件应用。${UI_RESET}"
     echo -e "${UI_CYAN}  仅激进内核运行且无其他拥塞控制冲突时生效；当前默认算法: ${current_algo:-未知}，默认队列: ${current_qdisc:-未知}${UI_RESET}"
     if systemctl is-active --quiet skyline-speederd.service || \
        systemctl is-active --quiet skyline-speeder-enable.service; then
@@ -358,6 +385,12 @@ remove_aggressive_bbr_config() {
             "${SUDO[@]}" rm -f -- "$target" || return 1
         fi
     done
+    if [[ "$AGGRESSIVE_LEGACY_CONF" != "$AGGRESSIVE_CONF" ]] && \
+       ! "${SUDO[@]}" test -L "$AGGRESSIVE_LEGACY_CONF" && \
+       "${SUDO[@]}" test -f "$AGGRESSIVE_LEGACY_CONF" && \
+       "${SUDO[@]}" grep -Fxq "$AGGRESSIVE_MARKER" "$AGGRESSIVE_LEGACY_CONF"; then
+        "${SUDO[@]}" rm -f -- "$AGGRESSIVE_LEGACY_CONF" || return 1
+    fi
     if [[ "$removed_unit" -eq 1 ]]; then
         "${SUDO[@]}" systemctl daemon-reload || return 1
     fi
