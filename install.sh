@@ -146,7 +146,7 @@ get_release_prefix() {
 }
 
 configure_aggressive_bbr() {
-    local target current_algo current_qdisc
+    local target current_algo current_qdisc running_kernel
     # Do not replace files that another administrator or program owns.
     for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
         if "${SUDO[@]}" test -L "$target"; then
@@ -220,8 +220,19 @@ EOF
     fi
     current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
     current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+    running_kernel=$(uname -r 2>/dev/null || true)
     echo -e "\033[36m  激进版 BBR 配置: $AGGRESSIVE_CONF\033[0m"
     echo -e "\033[36m  仅激进内核运行且无其他拥塞控制冲突时生效；当前算法: ${current_algo:-未知}，队列: ${current_qdisc:-未知}\033[0m"
+    if systemctl is-active --quiet skyline-speederd.service || \
+       systemctl is-active --quiet skyline-speeder-enable.service; then
+        echo -e "\033[33m  检测到 Skyline 正在运行，已保留其拥塞控制\033[0m"
+    elif [[ -n "$current_algo" && "$current_algo" != bbr && "$current_algo" != cubic && "$current_algo" != reno ]]; then
+        echo -e "\033[33m  检测到其他拥塞算法 $current_algo，已保留现有设置\033[0m"
+    elif [[ ! "$running_kernel" =~ -aggressive-xanmod[0-9]+$ ]]; then
+        echo -e "\033[36m  配置将在启动激进内核后重新检查\033[0m"
+    elif [[ "$current_algo" != bbr ]]; then
+        echo -e "\033[33m  当前算法不是 BBR，请检查服务日志及其他网络配置\033[0m"
+    fi
     return 0
 }
 

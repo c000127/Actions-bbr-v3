@@ -306,6 +306,16 @@ assert_output_contains '当前拥塞控制:'
 echo 'PASS: installing on the running aggressive kernel immediately applies BBR'
 
 reset_fixture
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=skyline_cc TEST_SKYLINE_ACTIVE=1 TEST_EXECUTE_START=1
+run_installer '6\nn\n\n0\n'
+[[ -f "$BBRV3_AGGRESSIVE_CONF" ]] || { echo 'Expected a saved aggressive configuration' >&2; exit 1; }
+assert_log_not_contains 'sysctl -p'
+assert_output_contains '检测到 Skyline 正在运行，已保留其拥塞控制'
+echo 'PASS: installation saves the profile but reports and preserves an active Skyline service'
+
+reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
 printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
 run_installer '6\nn\n\n0\n'
