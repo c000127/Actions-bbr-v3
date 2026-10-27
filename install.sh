@@ -149,11 +149,11 @@ configure_aggressive_bbr() {
     local target current_algo current_qdisc
     # Do not replace files that another administrator or program owns.
     for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
-        if [[ -L "$target" ]]; then
+        if "${SUDO[@]}" test -L "$target"; then
             echo -e "\033[31m配置路径是符号链接，未覆盖: $target\033[0m" >&2
             return 1
         fi
-        if [[ -e "$target" ]] && ! grep -Fxq "$AGGRESSIVE_MARKER" "$target"; then
+        if "${SUDO[@]}" test -e "$target" && ! "${SUDO[@]}" grep -Fxq "$AGGRESSIVE_MARKER" "$target"; then
             echo -e "\033[31m配置文件已存在且不属于本项目，未覆盖: $target\033[0m" >&2
             return 1
         fi
@@ -206,7 +206,7 @@ ExecStart=/bin/bash $AGGRESSIVE_HELPER $AGGRESSIVE_CONF
 [Install]
 WantedBy=multi-user.target
 EOF
-    if [[ ! -e "$AGGRESSIVE_CONF" ]] && \
+    if ! "${SUDO[@]}" test -e "$AGGRESSIVE_CONF" && \
        ! "${SUDO[@]}" install -D -m 0644 "$DOWNLOAD_DIR/aggressive.conf" "$AGGRESSIVE_CONF"; then
         return 1
     fi
@@ -226,19 +226,30 @@ EOF
 }
 
 remove_aggressive_bbr_config() {
-    local target
-    if [[ ! -L "$AGGRESSIVE_UNIT" && -e "$AGGRESSIVE_UNIT" ]] && grep -Fxq "$AGGRESSIVE_MARKER" "$AGGRESSIVE_UNIT"; then
+    local target removed_unit=0
+    for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
+        if "${SUDO[@]}" test -L "$target" || \
+           { "${SUDO[@]}" test -e "$target" && ! "${SUDO[@]}" grep -Fxq "$AGGRESSIVE_MARKER" "$target"; }; then
+            echo -e "\033[33m发现非本项目的配置，保留全部激进版配置文件: $target\033[0m" >&2
+            return 1
+        fi
+    done
+    if "${SUDO[@]}" test -e "$AGGRESSIVE_UNIT"; then
         if ! "${SUDO[@]}" systemctl disable --now "${AGGRESSIVE_UNIT##*/}"; then
             echo -e "\033[33m无法禁用激进版 BBR 服务，请手动检查\033[0m" >&2
             return 1
         fi
+        removed_unit=1
     fi
     for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
-        if [[ ! -L "$target" && -e "$target" ]] && grep -Fxq "$AGGRESSIVE_MARKER" "$target"; then
+        if "${SUDO[@]}" test -e "$target"; then
             "${SUDO[@]}" rm -f -- "$target" || return 1
         fi
     done
-    "${SUDO[@]}" systemctl daemon-reload || return 1
+    if [[ "$removed_unit" -eq 1 ]]; then
+        "${SUDO[@]}" systemctl daemon-reload || return 1
+    fi
+    return 0
 }
 
 download_and_install() {
@@ -324,10 +335,7 @@ download_and_install() {
     installed_tag="${installed_tag#x86_64-}"
     installed_tag="${installed_tag#arm64-}"
     local current_algo current_qdisc
-    current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
-    current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
     echo -e "\033[36m  新内核: \033[1;32m$(normalize_version "$installed_tag") ($profile)\033[0m"
-    echo -e "\033[36m  当前拥塞控制: \033[1;32m${current_algo:-未知}  队列: \033[1;32m${current_qdisc:-未知}\033[0m"
     if [[ "$profile" == "aggressive" ]]; then
         if ! configure_aggressive_bbr; then
             echo -e "\033[33m  内核已安装，但自动 BBR 配置未完成；请检查上方错误\033[0m"
@@ -340,6 +348,9 @@ download_and_install() {
         echo -e "\033[36m  安装未修改网络配置；可在菜单中手动启用 BBR\033[0m"
         echo -e "\033[33m  ⚠ 使用该内核需要重启；安装旧版时请确认 GRUB 选择的版本\033[0m"
     fi
+    current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+    current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+    echo -e "\033[36m  当前拥塞控制: \033[1;32m${current_algo:-未知}  队列: \033[1;32m${current_qdisc:-未知}\033[0m"
     echo -n -e "\033[36m立即重启？(y/n): \033[0m"
     local ans
     read -r ans || return 0

@@ -120,6 +120,7 @@ python3 tests/compatibility_workflow_test.py
 python3 tests/test_aggressive_profile.py
 python3 tests/test_build_profiles.py
 python3 tests/test_pair_build.py
+python3 tests/test_pair_workflow.py
 ```
 
 这些测试不会安装或卸载内核，也不会修改系统网络配置。GitHub Actions 会在相关文件发生变更时运行测试。

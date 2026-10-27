@@ -112,6 +112,9 @@ case "$cmd" in
             daemon-reload|enable|start|disable)
                 printf 'systemctl %s\n' "$*" >> "$TEST_LOG"
                 [[ ${TEST_SYSTEMCTL_FAIL:-} == "$1" ]] && exit 1
+                if [[ $1 == start && ${TEST_EXECUTE_START:-0} == 1 ]]; then
+                    bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF" || exit 1
+                fi
                 exit 0
                 ;;
         esac
@@ -168,7 +171,7 @@ reset_fixture() {
     TEST_RUNNING=7.2.1-xanmod1
     rm -f "$BBRV3_SYSCTL_CONF" "$TEST_DIR/algorithm" "$TEST_DIR/tee-content"
     rm -rf "$TEST_DIR/aggressive"
-    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_SYSTEMCTL_FAIL TEST_ARCH
+    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_SYSTEMCTL_FAIL TEST_EXECUTE_START TEST_ARCH
 }
 
 run_installer() {
@@ -282,10 +285,25 @@ TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_SKYLINE_ACTIVE=1 bash "$BBRV3_AGGRESS
 assert_log_not_contains 'sysctl -p'
 TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=custom_cc bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
 assert_log_not_contains 'sysctl -p'
+if TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_AVAILABLE=reno bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"; then
+    echo 'Expected automatic activation to fail when BBR is unavailable' >&2
+    exit 1
+fi
+assert_log_not_contains 'sysctl -p'
 TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=cubic bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
 assert_log_contains "sysctl -p $BBRV3_AGGRESSIVE_CONF"
 assert_log_not_contains 'net.core.default_qdisc'
 echo 'PASS: automatic BBR applies only to the aggressive kernel without a conflicting service or algorithm'
+
+reset_fixture
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
+export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=reno TEST_EXECUTE_START=1
+run_installer '6\nn\n\n0\n'
+assert_log_contains "sysctl -p $BBRV3_AGGRESSIVE_CONF"
+grep -Fxq 'bbr' "$TEST_DIR/algorithm"
+assert_output_contains '当前拥塞控制:'
+echo 'PASS: installing on the running aggressive kernel immediately applies BBR'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
@@ -296,6 +314,16 @@ assert_log_not_contains 'dpkg -i'
 grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
 assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
 echo 'PASS: an existing aggressive installation gains the automatic configuration without reinstalling'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+mkdir -p "$TEST_DIR/aggressive"
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' 'net.ipv4.tcp_congestion_control=bbr' '# User note' > "$BBRV3_AGGRESSIVE_CONF"
+run_installer '6\nn\n\n0\n'
+grep -Fxq '# User note' "$BBRV3_AGGRESSIVE_CONF"
+assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
+echo 'PASS: updating the automatic service preserves an existing managed configuration'
 
 reset_fixture
 printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
@@ -498,6 +526,20 @@ assert_log_contains 'systemctl disable --now xanmod-aggressive-bbr.service'
 }
 assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
 echo 'PASS: aggressive uninstall removes only its own automatic configuration'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+mkdir -p "$TEST_DIR/aggressive"
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$BBRV3_AGGRESSIVE_CONF"
+printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$BBRV3_AGGRESSIVE_HELPER"
+printf '%s\n' '# User replacement unit' > "$BBRV3_AGGRESSIVE_UNIT"
+run_installer '8\n\n0\n'
+assert_output_contains '发现非本项目的配置，保留全部激进版配置文件'
+[[ -e "$BBRV3_AGGRESSIVE_CONF" && -e "$BBRV3_AGGRESSIVE_HELPER" && -e "$BBRV3_AGGRESSIVE_UNIT" ]] || {
+    echo 'Removed files used by an unmanaged service' >&2; exit 1;
+}
+assert_log_not_contains 'systemctl disable --now'
+echo 'PASS: uninstall preserves all files if a service file is no longer managed by the project'
 
 reset_fixture
 export TEST_MISSING_DEP=1 TEST_APT_UPDATE_FAIL=1

@@ -10,6 +10,7 @@ on:
       - tests/test_aggressive_profile.py
       - tests/test_build_profiles.py
       - tests/test_pair_build.py
+      - tests/test_pair_workflow.py
       - tests/bench-bbr-loss.sh
       - tests/build-bbraggr-module.sh
       - tests/summarize-bbr-loss.py
@@ -29,6 +30,7 @@ on:
       - tests/test_aggressive_profile.py
       - tests/test_build_profiles.py
       - tests/test_pair_build.py
+      - tests/test_pair_workflow.py
       - tests/bench-bbr-loss.sh
       - tests/build-bbraggr-module.sh
       - tests/summarize-bbr-loss.py
@@ -60,3 +62,4 @@ jobs:
           python3 tests/test_aggressive_profile.py
           python3 tests/test_build_profiles.py
           python3 tests/test_pair_build.py
+          python3 tests/test_pair_workflow.py
