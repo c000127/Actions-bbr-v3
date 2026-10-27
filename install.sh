@@ -87,6 +87,31 @@ normalize_version() {
     [[ "$ver" =~ ^([0-9]+\.[0-9]+)(-.*)?$ ]] && echo "${BASH_REMATCH[1]}.0${BASH_REMATCH[2]}" || echo "$ver"
 }
 
+# Installed package names and release asset URLs both carry the XanMod revision.
+get_xanmod_revision() {
+    local version="$1" profile="$2" entry name candidate revision highest=""
+    while IFS= read -r entry; do
+        name=${entry##*/}
+        name=${name%%_*}
+        name=${name%%:*}
+        [[ "$name" =~ ^linux-image-(unsigned-)?(.+)-xanmod([0-9]{1,6})$ ]] || continue
+        candidate=${BASH_REMATCH[2]}
+        revision=$((10#${BASH_REMATCH[3]}))
+        if [[ "$profile" == "aggressive" ]]; then
+            [[ "$candidate" == *-aggressive ]] || continue
+            candidate=${candidate%-aggressive}
+        else
+            [[ "$candidate" != *-aggressive ]] || continue
+        fi
+        [[ "$(normalize_version "$candidate")" == "$(normalize_version "$version")" ]] || continue
+        if [[ -z "$highest" ]] || (( revision > highest )); then
+            highest=$revision
+        fi
+    done
+    [[ -z "$highest" ]] || printf '%s\n' "$highest"
+    return 0
+}
+
 # 版本排序键: 7.0.2 > 7.0.2-rc1
 version_sort_key() {
     local tag="${1#aggressive-}"
@@ -455,7 +480,16 @@ do_install_latest() {
     installed=$(get_installed_version "$profile")
     echo -e "\033[36m最新版本: \033[1;32m$version\033[0m  已安装: \033[1;32m${installed:-无}\033[0m"
 
+    local installed_revision release_revision
     if [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" ]]; then
+        installed_revision=$(get_installed_packages "$profile" | get_xanmod_revision "$version" "$profile")
+        release_revision=$(echo "$data" | jq -r --arg tag "$latest_tag" \
+            '.[] | select(.tag_name == $tag) | .assets[].browser_download_url' | get_xanmod_revision "$version" "$profile")
+    fi
+    if [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" && \
+          -n "$installed_revision" && -n "$release_revision" ]] && (( release_revision > installed_revision )); then
+        echo -e "\033[36m发现 XanMod 修订更新: xanmod${installed_revision} → xanmod${release_revision}\033[0m"
+    elif [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" ]]; then
         echo -e "\033[1;32m已是最新版本\033[0m"
         echo -n -e "\033[36m仍要重新安装？(y/n): \033[0m"
         local ans

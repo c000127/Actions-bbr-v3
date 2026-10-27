@@ -214,6 +214,43 @@ assert_log_not_contains 'apt-get remove'
 echo 'PASS: reinstall retains the newly installed package'
 
 reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' \
+    'https://example.test/linux-image-7.2.12-xanmod2_1_amd64.deb' \
+    'https://example.test/linux-headers-7.2.12-xanmod2_1_amd64.deb' > "$TEST_URLS"
+TEST_RUNNING=7.2.12-xanmod1
+run_installer '1\nn\n\n0\n'
+assert_output_contains 'xanmod1 → xanmod2'
+assert_log_contains 'dpkg -i '
+assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.12-xanmod1'
+assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.12-aggressive-xanmod1'
+echo 'PASS: a newer standard XanMod revision upgrades while preserving the running and aggressive kernels'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
+printf '%s\n' \
+    'https://example.test/linux-image-7.2.12-aggressive-xanmod2_1_amd64.deb' \
+    'https://example.test/linux-headers-7.2.12-aggressive-xanmod2_1_amd64.deb' > "$TEST_URLS"
+TEST_RUNNING=7.2.12-xanmod1
+run_installer '6\nn\n\n0\n'
+assert_output_contains 'xanmod1 → xanmod2'
+assert_log_contains 'dpkg -i '
+assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.12-aggressive-xanmod1'
+assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.12-xanmod1'
+echo 'PASS: a newer aggressive XanMod revision upgrades independently'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-xanmod2 linux-image-7.2.12-xanmod10 > "$TEST_PACKAGES"
+printf '%s\n' \
+    'https://example.test/linux-image-7.2.12-xanmod3_1_amd64.deb' \
+    'https://example.test/linux-headers-7.2.12-xanmod3_1_amd64.deb' > "$TEST_URLS"
+run_installer '1\nn\n\n0\n'
+assert_output_contains '已是最新版本'
+assert_log_not_contains 'dpkg -i '
+echo 'PASS: the highest installed XanMod revision prevents an automatic downgrade'
+
+reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"
 printf '%s\n' x86_64-7.2.9 x86_64-7.2.12 > "$TEST_TAGS"
 run_installer '2\n1\nn\n\n0\n'
