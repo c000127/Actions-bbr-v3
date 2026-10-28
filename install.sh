@@ -328,10 +328,12 @@ get_release_prefix() {
 # A published manifest is the atomic pointer to a complete build. Uploaded
 # assets from an interrupted build are ignored until that pointer changes.
 get_release_assets() {
-    local tag=$1 release_data=$2
-    if ! printf '%s\n' "$release_data" | jq -er --arg tag "$tag" '
+    local tag=$1 release_data=$2 deb_arch=amd64
+    [[ "${ARCH:-x86_64}" == aarch64 ]] && deb_arch=arm64
+    if ! printf '%s\n' "$release_data" | jq -er --arg tag "$tag" --arg arch "$deb_arch" '
         def selected($release; $entry):
             if (($entry.name | type) != "string") or
+               (($entry.name | endswith("_" + $arch + ".deb")) | not) or
                (($entry.sha256 | type) != "string") or
                (($entry.sha256 | test("^[0-9a-f]{64}$")) | not) or
                (($entry.size | type) != "number") then error("invalid manifest asset") else . end |
@@ -346,8 +348,9 @@ get_release_assets() {
             selected($release; $m.assets.image), selected($release; $m.assets.headers)
         else
             [$release.assets[] | select(.state == "uploaded") |
-                select((.name | test("-build[0-9]+a[0-9]+_amd64\\.deb$")) | not)] as $legacy |
-            ([$legacy[] | select(.name | test("^linux-image-(unsigned-)?[0-9]+\\.[0-9]+(\\.[0-9]+)?(-rc[0-9]+)?(-aggressive)?-xanmod[0-9]+_.*_amd64\\.deb$"))] |
+                select((.name | test("-build[0-9]+a[0-9]+_(amd64|arm64)\\.deb$")) | not) |
+                select(.name | endswith("_" + $arch + ".deb"))] as $legacy |
+            ([$legacy[] | select(.name | test("^linux-image-(unsigned-)?[0-9]+\\.[0-9]+(\\.[0-9]+)?(-rc[0-9]+)?(-aggressive)?-xanmod[0-9]+_.*_(amd64|arm64)\\.deb$"))] |
                 sort_by(.name | capture("-xanmod(?<revision>[0-9]+)_").revision | tonumber) | last) as $image |
             if $image == null then error("no complete legacy image") else . end |
             ($image.name | capture("^linux-image-(?:unsigned-)?(?<kernel>[^_]+)_").kernel) as $kernel |

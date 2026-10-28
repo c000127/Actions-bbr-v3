@@ -17,12 +17,21 @@ def asset(name, size=10):
     return {"name": name, "state": "uploaded", "size": size, "browser_download_url": "https://example.test/" + name}
 
 
-def select(release):
-    return subprocess.run(["bash", "-c", "UI_RED='' UI_RESET=''\n" + SELECTOR + '\nget_release_assets "$1" "$2"',
-                           "_", TAG, json.dumps([release])], capture_output=True, text=True)
+def select(release, arch="x86_64"):
+    return subprocess.run(["bash", "-c", 'UI_RED="" UI_RESET="" ARCH="$3"\n' + SELECTOR + '\nget_release_assets "$1" "$2"',
+                           "_", release["tag_name"], json.dumps([release]), arch], capture_output=True, text=True)
 
 
 class ReleaseAssetsTest(unittest.TestCase):
+    def test_legacy_arm64_release_keeps_its_architecture(self):
+        names = ["linux-image-7.3.0-xanmod1_1_arm64.deb", "linux-headers-7.3.0-xanmod1_1_arm64.deb",
+                 "linux-image-7.3.0-xanmod2_1_amd64.deb"]
+        result = select({"tag_name": "arm64-7.3.0", "body": "legacy", "assets": [asset(name) for name in names]}, "aarch64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(names[0], result.stdout)
+        self.assertIn(names[1], result.stdout)
+        self.assertNotIn(names[2], result.stdout)
+
     def test_legacy_release_ignores_incomplete_staged_uploads(self):
         names = ["linux-image-7.3.0-xanmod1_1_amd64.deb", "linux-headers-7.3.0-xanmod1_1_amd64.deb",
                  "linux-image-7.3.0-xanmod2_1-build99a1_amd64.deb"]
