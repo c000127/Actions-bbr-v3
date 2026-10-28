@@ -31,6 +31,34 @@ case "$cmd" in
         fi
         printf 'dpkg %s\n' "$*" >> "$TEST_LOG"
         [[ ${TEST_DPKG_FAIL:-0} == 1 ]] && exit 1
+        if [[ ${1:-} == -i ]]; then
+            printf '%s\n' "${@:2}" > "$TEST_DIR/dpkg-installed"
+        fi
+        exit 0
+        ;;
+    update-grub)
+        echo update-grub >> "$TEST_LOG"
+        [[ ${TEST_GRUB_FAIL:-0} == 1 ]] && exit 1
+        if [[ ${TEST_GRUB_NO_CONFIG:-0} == 1 ]]; then
+            rm -f "$BBRV3_GRUB_CONFIG"
+            exit 0
+        fi
+        : > "$BBRV3_GRUB_CONFIG"
+        [[ ${TEST_GRUB_EMPTY:-0} == 1 ]] && exit 0
+        printf '\tlinux /boot/vmlinuz-6.12.0-debian root=/dev/vda1\n' >> "$BBRV3_GRUB_CONFIG"
+        if [[ -f "$TEST_DIR/dpkg-installed" && ${TEST_GRUB_NO_ENTRY:-0} != 1 ]]; then
+            while IFS= read -r deb; do
+                package=${deb##*/}
+                package=${package%%_*}
+                [[ $package == linux-image-* && $package != *-dbg ]] || continue
+                kernel=${package#linux-image-}
+                kernel=${kernel#unsigned-}
+                printf '\tlinux /boot/vmlinuz-%s%s root=/dev/vda1\n' "$kernel" "${TEST_GRUB_SUFFIX:-}" >> "$BBRV3_GRUB_CONFIG"
+            done < "$TEST_DIR/dpkg-installed"
+        fi
+        if [[ -n ${TEST_GRUB_STALE:-} ]]; then
+            printf '\tlinux /boot/vmlinuz-%s root=/dev/vda1\n' "$TEST_GRUB_STALE" >> "$BBRV3_GRUB_CONFIG"
+        fi
         exit 0
         ;;
     dpkg-query)
@@ -148,7 +176,7 @@ case "$cmd" in
 esac
 MOCK
 
-for cmd in sudo apt-get dpkg dpkg-query dpkg-deb uname curl jq wget sysctl systemctl modinfo tee rm clear reboot; do
+for cmd in sudo apt-get dpkg dpkg-query dpkg-deb update-grub uname curl jq wget sysctl systemctl modinfo tee rm clear reboot; do
     cp "$TEST_DIR/bin/mock-command" "$TEST_DIR/bin/$cmd"
     chmod +x "$TEST_DIR/bin/$cmd"
 done
@@ -163,6 +191,7 @@ export BBRV3_AGGRESSIVE_LEGACY_CONF="$TEST_DIR/aggressive/legacy.conf"
 export BBRV3_AGGRESSIVE_HELPER="$TEST_DIR/aggressive/apply.sh"
 export BBRV3_AGGRESSIVE_UNIT="$TEST_DIR/aggressive/xanmod-aggressive-bbr.service"
 export BBRV3_MANAGED_PACKAGES="$TEST_DIR/registry/managed-packages"
+export BBRV3_GRUB_CONFIG="$TEST_DIR/grub.cfg"
 export TEST_RUNNING=7.2.1-xanmod1
 export TMPDIR="$TEST_DIR/tmp"
 
@@ -174,10 +203,10 @@ reset_fixture() {
         'https://example.test/linux-image-7.2.12-xanmod1_1_amd64.deb' \
         'https://example.test/linux-headers-7.2.12-xanmod1_1_amd64.deb' > "$TEST_URLS"
     TEST_RUNNING=7.2.1-xanmod1
-    rm -f "$BBRV3_SYSCTL_CONF" "$TEST_DIR/algorithm" "$TEST_DIR/tee-content"
+    rm -f "$BBRV3_SYSCTL_CONF" "$BBRV3_GRUB_CONFIG" "$TEST_DIR/algorithm" "$TEST_DIR/tee-content" "$TEST_DIR/dpkg-installed"
     rm -rf "$TEST_DIR/aggressive"
     rm -rf "$TEST_DIR/registry"
-    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_CURL_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_SYSTEMCTL_FAIL TEST_EXECUTE_START TEST_ARCH
+    unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_CURL_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_SYSTEMCTL_FAIL TEST_EXECUTE_START TEST_ARCH TEST_GRUB_FAIL TEST_GRUB_NO_CONFIG TEST_GRUB_NO_ENTRY TEST_GRUB_EMPTY TEST_GRUB_SUFFIX TEST_GRUB_STALE
 }
 
 run_installer() {
@@ -213,12 +242,53 @@ reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.0-xanmod1 > "$TEST_PACKAGES"
 run_installer '1\nn\n\n0\n'
 assert_log_contains 'dpkg -i '
+assert_log_contains 'update-grub'
+assert_output_contains 'GRUB 菜单已更新，已找到新内核启动项'
 assert_log_not_contains 'apt-get remove'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains 'sysctl -w'
 assert_log_not_contains 'tee '
 assert_output_contains '新内核:'
 echo 'PASS: upgrade retains previous kernels without changing network settings'
+
+reset_fixture
+export TEST_GRUB_FAIL=1
+run_installer '1\ny\n0\n'
+assert_log_contains 'dpkg -i '
+assert_log_contains 'update-grub'
+assert_log_not_contains 'reboot'
+assert_output_contains '内核包已安装，但 GRUB 更新或菜单检查未完成'
+assert_output_not_contains '立即重启？'
+grep -Fxq $'standard\tlinux-image-7.2.12-xanmod1' "$BBRV3_MANAGED_PACKAGES"
+echo 'PASS: failed GRUB update preserves the installed package record and does not offer reboot'
+
+reset_fixture
+export TEST_GRUB_NO_ENTRY=1
+run_installer '1\ny\n0\n'
+assert_output_contains 'GRUB 菜单中未找到新内核 7.2.12-xanmod1'
+assert_output_not_contains '立即重启？'
+assert_log_not_contains 'reboot'
+echo 'PASS: an absent installed-kernel entry blocks the reboot prompt'
+
+reset_fixture
+export TEST_GRUB_SUFFIX=-other
+run_installer '1\ny\n0\n'
+assert_output_contains 'GRUB 菜单中未找到新内核 7.2.12-xanmod1'
+assert_output_not_contains '立即重启？'
+echo 'PASS: a similarly named kernel is not mistaken for the installed image'
+
+reset_fixture
+export TEST_GRUB_NO_CONFIG=1
+run_installer '1\ny\n0\n'
+assert_output_contains '无法读取'
+assert_output_not_contains '立即重启？'
+echo 'PASS: a missing GRUB configuration is reported before reboot'
+
+reset_fixture
+run_installer '1\ny\n\n0\n'
+assert_log_contains 'reboot'
+assert_output_contains '默认启动项由 GRUB 配置决定'
+echo 'PASS: a successful installation offers reboot without claiming the default entry is known'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.6-x64v3-xanmod1 > "$TEST_PACKAGES"
@@ -364,7 +434,7 @@ printf '%s\n' \
 run_installer '6\nn\n\n0\n'
 assert_log_contains 'linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb'
 assert_log_not_contains 'apt-get remove'
-assert_output_contains 'GRUB 默认可能仍选择标准内核'
+assert_output_contains '请确认 GRUB 选择的是 7.2.12-aggressive-xanmod1'
 assert_output_contains '7.2.12-aggressive-xanmod1'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains 'sysctl -w'
@@ -708,12 +778,42 @@ run_installer '4\ny\n\n0\n'
 assert_log_contains 'apt-get remove'
 assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
 assert_output_contains '卸载未完成'
+assert_log_not_contains 'update-grub'
 echo 'PASS: failed uninstall preserves the configuration and reports failure'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_GRUB_FAIL=1
+run_installer '8\ny\n\n0\n'
+assert_log_contains 'apt-get remove'
+assert_log_contains 'update-grub'
+assert_output_contains '内核包已卸载，但 GRUB 更新或菜单检查未完成'
+assert_output_not_contains '激进版内核卸载完成'
+echo 'PASS: a failed GRUB refresh after uninstall reports the actual package state'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_GRUB_STALE=7.2.12-aggressive-xanmod1
+run_installer '8\ny\n\n0\n'
+assert_output_contains 'GRUB 菜单仍引用已卸载内核 7.2.12-aggressive-xanmod1'
+assert_output_not_contains '激进版内核卸载完成'
+echo 'PASS: a stale removed-kernel entry is reported'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_GRUB_EMPTY=1
+run_installer '8\ny\n\n0\n'
+assert_output_contains '未在'
+assert_output_contains '中识别到 Linux 启动项'
+assert_output_not_contains '激进版内核卸载完成'
+echo 'PASS: an empty GRUB menu is not reported as a successful uninstall'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
 run_installer '8\ny\n\n0\n'
 assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.12-aggressive-xanmod1'
+assert_log_contains 'update-grub'
+assert_output_contains 'GRUB 菜单已更新，未发现已卸载内核的启动项'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
 echo 'PASS: aggressive uninstall preserves the standard kernel and shared configuration'
@@ -757,6 +857,7 @@ printf '%s\n' '# Managed by Actions-bbr-v3 package registry' \
     $'aggressive\tlinux-headers-7.2.12-aggressive-xanmod1' > "$BBRV3_MANAGED_PACKAGES"
 run_installer '8\ny\n\n0\n'
 assert_log_contains 'apt-get remove --purge -y -- linux-headers-7.2.12-aggressive-xanmod1'
+assert_log_not_contains 'update-grub'
 assert_output_contains '未找到激进版镜像，可清理以下已记录头文件'
 echo 'PASS: orphaned recorded headers can be cleaned after reboot'
 

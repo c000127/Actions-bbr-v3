@@ -66,10 +66,66 @@ AGGRESSIVE_UNIT="${BBRV3_AGGRESSIVE_UNIT:-/etc/systemd/system/xanmod-aggressive-
 AGGRESSIVE_MARKER='# Managed by Actions-bbr-v3 aggressive profile'
 MANAGED_PACKAGES="${BBRV3_MANAGED_PACKAGES:-/var/lib/xanmod-bbr/managed-packages}"
 MANAGED_MARKER='# Managed by Actions-bbr-v3 package registry'
+GRUB_CONFIG="${BBRV3_GRUB_CONFIG:-/boot/grub/grub.cfg}"
 DOWNLOAD_DIR=$(mktemp -d) || { echo -e "${UI_RED}无法创建临时下载目录${UI_RESET}" >&2; exit 1; }
 trap 'rm -rf -- "$DOWNLOAD_DIR"' EXIT
 
 # ── 工具函数 ──────────────────────────────────────────────
+
+refresh_grub() {
+    local operation=$1 pkg kernel entries entry expected found failed=0
+    shift
+
+    echo -e "${UI_CYAN}更新 GRUB 启动菜单...${UI_RESET}"
+    if ! "${SUDO[@]}" update-grub; then
+        echo -e "${UI_RED}GRUB 更新失败或 update-grub 不可用；重启前请检查错误并执行 sudo update-grub。${UI_RESET}"
+        return 1
+    fi
+
+    # A menu entry is not proof that GRUB will select it or that it can boot.
+    if ! entries=$("${SUDO[@]}" awk '
+        $1 ~ /^(linux|linuxefi|linux16)$/ {
+            count = split($2, parts, "/")
+            print parts[count]
+        }
+    ' "$GRUB_CONFIG"); then
+        echo -e "${UI_RED}无法读取 $GRUB_CONFIG；重启前请检查 GRUB 启动菜单。${UI_RESET}"
+        return 1
+    fi
+    if [[ -z "$entries" ]]; then
+        echo -e "${UI_RED}未在 $GRUB_CONFIG 中识别到 Linux 启动项；重启前请检查 GRUB 配置。${UI_RESET}"
+        return 1
+    fi
+
+    for pkg in "$@"; do
+        pkg=${pkg%%:*}
+        kernel=${pkg#linux-image-}
+        kernel=${kernel#unsigned-}
+        expected="vmlinuz-$kernel"
+        found=0
+        while IFS= read -r entry; do
+            if [[ "$entry" == "$expected" ]]; then
+                found=1
+                break
+            fi
+        done <<< "$entries"
+        if [[ "$operation" == install && "$found" -eq 0 ]]; then
+            echo -e "${UI_RED}GRUB 菜单中未找到新内核 $kernel；重启前请检查启动菜单。${UI_RESET}"
+            failed=1
+        elif [[ "$operation" == remove && "$found" -eq 1 ]]; then
+            echo -e "${UI_RED}GRUB 菜单仍引用已卸载内核 $kernel；重启前请检查启动菜单。${UI_RESET}"
+            failed=1
+        fi
+    done
+    [[ "$failed" -eq 0 ]] || return 1
+    if [[ "$operation" == install ]]; then
+        echo -e "${UI_BOLD_GREEN}GRUB 菜单已更新，已找到新内核启动项。${UI_RESET}"
+    else
+        echo -e "${UI_BOLD_GREEN}GRUB 菜单已更新，未发现已卸载内核的启动项。${UI_RESET}"
+    fi
+    echo "  默认启动项由 GRUB 配置决定；菜单项存在不代表已选为默认项或已验证可启动。"
+    return 0
+}
 
 get_installed_packages() {
     local profile="${1:-standard}"
@@ -575,7 +631,7 @@ download_and_install() {
     echo -e "${UI_CYAN}安装内核...${UI_RESET}"
     echo "  已安装的其他内核会保留，以便重启后回退。"
     if ! "${SUDO[@]}" dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
-        echo -e "${UI_RED}安装未完成，未执行旧内核清理；请检查上方 dpkg 输出。${UI_RESET}"
+        echo -e "${UI_RED}安装未完成，未执行旧内核清理；请检查上方 dpkg 输出和 GRUB 菜单。${UI_RESET}"
         return 1
     fi
 
@@ -599,7 +655,7 @@ download_and_install() {
         if ! configure_aggressive_bbr; then
             echo -e "${UI_YELLOW}  内核已安装，但自动 BBR 配置未完成；请检查上方错误${UI_RESET}"
         fi
-        echo -e "${UI_YELLOW}  ⚠ GRUB 默认可能仍选择标准内核；请在高级选项中选择 $installed_kernel${UI_RESET}"
+        echo -e "${UI_YELLOW}  ⚠ 请确认 GRUB 选择的是 $installed_kernel；必要时在高级选项中选择${UI_RESET}"
         echo -e "${UI_YELLOW}    VPS 无交互启动方法请参阅 README；启动后请检查一次性启动项是否清除${UI_RESET}"
     else
         echo -e "${UI_CYAN}  安装未修改网络配置；可在菜单中手动启用 BBR${UI_RESET}"
@@ -608,6 +664,10 @@ download_and_install() {
     current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
     current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
     echo -e "${UI_CYAN}  当前默认拥塞控制: ${UI_BOLD_GREEN}${current_algo:-未知}${UI_RESET}  默认队列: ${UI_BOLD_GREEN}${current_qdisc:-未知}${UI_RESET}"
+    if ! refresh_grub install "${image_pkgs[@]}"; then
+        echo -e "${UI_YELLOW}内核包已安装，但 GRUB 更新或菜单检查未完成；请先处理后再重启。${UI_RESET}"
+        return 1
+    fi
     echo -n -e "${UI_CYAN}立即重启？(y/N): ${UI_RESET}"
     local ans
     read -r ans || return 0
@@ -943,7 +1003,7 @@ do_uninstall() {
         return 0
     fi
     if [[ ${#pkgs[@]} -gt 0 ]] && ! "${SUDO[@]}" apt-get remove --purge -y -- "${pkgs[@]}"; then
-        echo -e "${UI_RED}卸载未完成，未清理 BBR 配置；请检查上方 apt 输出。${UI_RESET}"
+        echo -e "${UI_RED}卸载未完成，未清理 BBR 配置；部分包可能已变化，请检查上方 apt 输出及 GRUB 菜单。${UI_RESET}"
         return 1
     fi
     removed=("${pkgs[@]}")
@@ -959,6 +1019,10 @@ do_uninstall() {
     fi
     if [[ "$profile" == "aggressive" ]] && ! remove_aggressive_bbr_config; then
         echo -e "${UI_YELLOW}激进版配置清理不完整，请手动检查${UI_RESET}"
+    fi
+    if [[ ${#pkgs[@]} -gt 0 ]] && ! refresh_grub remove "${pkgs[@]}"; then
+        echo -e "${UI_YELLOW}内核包已卸载，但 GRUB 更新或菜单检查未完成；请先处理后再重启。${UI_RESET}"
+        return 1
     fi
     echo -e "${UI_BOLD_GREEN}$(profile_label "$profile")内核卸载完成。${UI_RESET}"
     [[ "$removing_running" -eq 1 ]] && echo -e "${UI_YELLOW}重启前请确认其他内核可启动。${UI_RESET}"
