@@ -58,23 +58,9 @@ jobs:
       PROFILE: ${{ inputs.profile || 'standard' }}
       REQUESTED_XANMOD_TAG: ${{ inputs.xanmod_tag || '' }}
     steps:
-      - name: 🗑️ 释放磁盘空间 + 删除旧工作流
+      - name: 🗑️ 释放构建环境磁盘空间
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache &
-          # 并行删除本工作流的旧运行记录（best-effort，不阻塞构建）
-          # 使用 workflow_id 筛选，避免误删其他工作流（如 build_test.yml）的记录
-          if [ "$PROFILE" = "standard" ] && [ "${{ inputs.publish }}" = "true" ]; then
-            curl -sf -X GET \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/runs?per_page=50&status=completed" \
-            | jq -r '.workflow_runs[].id' 2>/dev/null | while read run_id; do
-              curl -sf -X DELETE \
-                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/runs/${run_id}" &
-            done
-          fi
           wait
           sudo apt-get clean
           df -h /
@@ -474,7 +460,7 @@ jobs:
           scripts/config --disable ACCESSIBILITY
 
           # ================================================================
-          # === 保守性能优化（从 build_test.yml 验证后引入）===
+          # === VPS 保守性能优化 ===
           # ================================================================
 
           # --- 启用 BTF（eBPF CO-RE 必需，现代可观测性基础）---

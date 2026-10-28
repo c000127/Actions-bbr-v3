@@ -57,6 +57,7 @@ GitHub Actions 的“检查上游并构建两个 BBRv3 内核”每 6 小时检�
 新版本会固定使用同一个上游标签并并行构建标准版和激进版。已完整发布的配置会跳过；某个版本缺包或
 上次构建失败时，下次检查会补齐。该工作流也可以手动运行，按需选择重新构建或只生成 Actions 产物。
 定时任务需要位于仓库默认分支，GitHub 的调度可能延迟。原有的单配置手动构建入口仍可使用。
+手动运行“构建 VPS 优化的 BBRv3 内核（XanMod）”时，可在 `profile` 中选择 `standard` 或 `aggressive`。
 公开仓库连续 60 天没有仓库活动时，GitHub 可能自动停用定时工作流；可在 Actions 页面重新启用。
 
 激进版产物发布到单独的
@@ -69,6 +70,9 @@ GitHub Actions 的“检查上游并构建两个 BBRv3 内核”每 6 小时检�
 - 可通过 GRUB 的高级选项选择标准版作为回退。
 
 激进构建遇到不匹配的上游 BBRv3 源码时会停止，避免发布只应用了部分参数的内核。
+
+旧 `dev` 分支的提交历史已合并到主线；其中基于 mainline、x86-64-v3 和 CachyOS 补丁的早期 Beta 实验
+没有替换当前的 XanMod 双配置构建，可从历史提交 `81a7cf4` 查看。
 
 激进版使用 `/etc/sysctl.d/99-xanmod-aggressive.profile` 保存 `net.ipv4.tcp_congestion_control=bbr`：
 
