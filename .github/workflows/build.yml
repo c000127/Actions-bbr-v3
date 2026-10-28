@@ -28,6 +28,16 @@ on:
         required: false
         default: ''
         type: string
+      source_commit:
+        description: Exact upstream commit selected by the coordinating workflow
+        required: false
+        default: ''
+        type: string
+      fingerprint:
+        description: Expected paired build input fingerprint
+        required: false
+        default: ''
+        type: string
       publish:
         description: Publish a GitHub release
         required: false
@@ -57,6 +67,8 @@ jobs:
       KERNEL_VERSION: ""
       PROFILE: ${{ inputs.profile || 'standard' }}
       REQUESTED_XANMOD_TAG: ${{ inputs.xanmod_tag || '' }}
+      REQUESTED_SOURCE_COMMIT: ${{ inputs.source_commit || '' }}
+      REQUESTED_FINGERPRINT: ${{ inputs.fingerprint || '' }}
     steps:
       - name: 🗑️ 释放构建环境磁盘空间
         run: |
@@ -321,6 +333,26 @@ jobs:
           fi
           echo "内核源码下载完成，目录大小: $(du -sh ./kernel/linux | cut -f1)"
 
+      - name: 🔐 固定并记录双版本构建来源
+        run: |
+          set -euo pipefail
+          source_commit=$(git -C ./kernel/linux rev-parse HEAD)
+          if [[ -n "$REQUESTED_SOURCE_COMMIT" && "$source_commit" != "$REQUESTED_SOURCE_COMMIT" ]]; then
+            echo "::error::上游标签指向的提交已变化，停止构建"
+            exit 1
+          fi
+          fingerprint=$(python3 scripts/build_provenance.py fingerprint "$XANMOD_TAG" "$source_commit")
+          if [[ -n "$REQUESTED_FINGERPRINT" && "$fingerprint" != "$REQUESTED_FINGERPRINT" ]]; then
+            echo "::error::构建输入与双版本计划不一致"
+            exit 1
+          fi
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || { echo "::error::无效的 Actions 构建编号"; exit 1; }
+          printf -v run_hex '%x' "$GITHUB_RUN_ID"
+          build_suffix="-b${fingerprint:0:10}r${run_hex}a${GITHUB_RUN_ATTEMPT}"
+          echo "SOURCE_COMMIT=$source_commit" >> "$GITHUB_ENV"
+          echo "BUILD_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+          echo "BUILD_SUFFIX=$build_suffix" >> "$GITHUB_ENV"
+
       - name: ✅ 验证 BBRv3 内置
         working-directory: ./kernel/linux
         run: |
@@ -328,10 +360,11 @@ jobs:
           echo "=== 验证 XanMod 内核包含 BBRv3 ==="
 
           # 检测 BBRv3 特征
-          if grep -qP 'BBR_VERSION\s+3' net/ipv4/tcp_bbr.c 2>/dev/null; then
+          if grep -qP '^#define\s+BBR_VERSION\s+3\s*$' net/ipv4/tcp_bbr.c 2>/dev/null; then
             echo "✅ BBR_VERSION = 3 确认"
           else
-            echo "::warning::未检测到 BBR_VERSION 3，BBRv3 可能未包含"
+            echo "::error::无法确认 BBRv3，拒绝发布未经验证的内核"
+            exit 1
           fi
 
           if grep -q 'bbr_ecn_alpha' net/ipv4/tcp_bbr.c 2>/dev/null; then
@@ -389,6 +422,9 @@ jobs:
 
           scripts/config --disable SYSTEM_TRUSTED_KEYS
           scripts/config --disable SYSTEM_REVOCATION_KEYS
+          # Each build has a distinct kernel release, so reinstalling a changed
+          # build cannot replace modules for the currently running kernel.
+          scripts/config --set-str LOCALVERSION "${BUILD_SUFFIX}${PROFILE_SUFFIX}"
 
           # === 编译性能优化：使用 ZSTD 替代 XZ 压缩（压缩速度快 3 倍，解压更快） ===
           scripts/config --disable KERNEL_XZ
@@ -511,8 +547,18 @@ jobs:
             make olddefconfig
           fi
 
+          # These are product guarantees, not optional optimization hints.
+          for required in \
+            'CONFIG_TCP_CONG_BBR=y' \
+            'CONFIG_DEFAULT_TCP_CONG="bbr"' \
+            'CONFIG_NET_SCH_FQ=y' \
+            'CONFIG_DEFAULT_NET_SCH="fq"' \
+            'CONFIG_DEBUG_INFO_BTF=y'; do
+            grep -Fxq "$required" .config || { echo "::error::必需的内核配置未生效: $required"; exit 1; }
+          done
+          grep -Fxq "CONFIG_LOCALVERSION=\"${BUILD_SUFFIX}${PROFILE_SUFFIX}\"" .config || { echo "::error::构建标识未生效"; exit 1; }
+
           if [ "$PROFILE" = "aggressive" ]; then
-            grep -Fxq 'CONFIG_LOCALVERSION="-aggressive"' .config || { echo "::error::激进版内核标识未生效"; exit 1; }
             grep -Fxq 'CONFIG_TCP_CONG_BBR=y' .config || { echo "::error::激进版 BBR 未内置"; exit 1; }
             grep -q 'BBRV3_AGGRESSIVE_PROFILE' net/ipv4/tcp_bbr.c || { echo "::error::激进版源码补丁未生效"; exit 1; }
             # 明确 LOCALVERSION 以避免源码修改时附加 SCM 标记；XanMod 的
@@ -561,10 +607,10 @@ jobs:
             make bindeb-pkg -j$(nproc) LOCALVERSION= \
               KCFLAGS="-pipe"
           elif [ "${{ matrix.arch }}" = "arm64" ]; then
-            make ARCH=arm64 bindeb-pkg -j$(nproc) \
+            make ARCH=arm64 bindeb-pkg -j$(nproc) LOCALVERSION= \
               KCFLAGS="-pipe"
           else
-            make bindeb-pkg -j$(nproc) \
+            make bindeb-pkg -j$(nproc) LOCALVERSION= \
               KCFLAGS="-pipe"
           fi
           BUILD_END=$(date +%s)
@@ -582,6 +628,31 @@ jobs:
           echo "最终上传的 .deb 文件："
           ls -lh linux-*.deb
 
+      - name: 🧾 为新产物生成独立名称和构建记录
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(./kernel/linux-*.deb)
+          [[ ${#packages[@]} -gt 0 ]] || { echo "::error::未生成 Debian 包"; exit 1; }
+          for package in "${packages[@]}"; do
+            [[ "$package" == *_amd64.deb ]] || { echo "::error::不支持的包架构: $package"; exit 1; }
+            mv -- "$package" "${package%_amd64.deb}-build${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}_amd64.deb"
+          done
+          images=(./kernel/linux-image-*.deb)
+          [[ ${#images[@]} -eq 1 ]] || { echo "::error::必须恰有一个内核镜像"; exit 1; }
+          image_name=$(dpkg-deb -f "${images[0]}" Package)
+          kernel_release=${image_name#linux-image-}
+          kernel_release=${kernel_release#unsigned-}
+          compiler=$(gcc --version | head -1)
+          python3 scripts/build_provenance.py manifest \
+            --profile "$PROFILE" --tag "$XANMOD_TAG" --source-commit "$SOURCE_COMMIT" \
+            --project-commit "$GITHUB_SHA" --fingerprint "$BUILD_FINGERPRINT" \
+            --kernel-release "$kernel_release" --compiler "$compiler" \
+            --config "kernel-config-${{ matrix.arch }}" --package-dir ./kernel \
+            > "$RUNNER_TEMP/build-manifest.json"
+          cp "$RUNNER_TEMP/build-manifest.json" ./kernel/build-manifest.json
+          echo "KERNEL_RELEASE=$kernel_release" >> "$GITHUB_ENV"
+
       - name: 📤 上传配置文件
         uses: actions/upload-artifact@v7
         with:
@@ -592,25 +663,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}-${{ env.XANMOD_BRANCH }}${{ env.PROFILE_SUFFIX }}
-          path: ./kernel/linux-*.deb
-
-      - name: 🧹 清理已有 Release 资源
-        if: inputs.publish == true
-        run: |
-          TAG="${{ env.RELEASE_TAG }}"
-          RELEASE=$(curl -sf \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}") || true
-          if [[ -n "$RELEASE" ]]; then
-            echo "$RELEASE" | jq -r '.assets[].id' | while read asset_id; do
-              curl -sf -X DELETE \
-                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository }}/releases/assets/${asset_id}"
-              echo "已删除 asset $asset_id"
-            done
-          fi
+          path: |
+            ./kernel/linux-*.deb
+            ./kernel/build-manifest.json
 
       - name: 🎉 发布到 GitHub Release
         if: inputs.publish == true
@@ -623,13 +678,13 @@ jobs:
       - name: 🔄 更新 Release 说明
         if: inputs.publish == true
         run: |
+          set -euo pipefail
           TAG="${{ env.RELEASE_TAG }}"
-          RELEASE_ID=$(curl -sf \
+          curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" \
-            | jq -r '.id')
-          if [[ -n "$RELEASE_ID" && "$RELEASE_ID" != "null" ]]; then
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" > "$RUNNER_TEMP/release.json"
+          RELEASE_ID=$(jq -er '.id' "$RUNNER_TEMP/release.json")
             if [ "$PROFILE" = "aggressive" ]; then
               VARIANT="实验性激进版：STARTUP 3.0×、CRUISE 1.2×、BBR 内部丢包阈值 25%；保留 ECN 和其他恢复机制。该阈值不保证实际丢包容忍率，可能增加重传及共享链路负载。"
             else
@@ -645,17 +700,22 @@ jobs:
           \`\`\`bash
           bash <(curl -fsSL https://raw.githubusercontent.com/c000127/Actions-bbr-v3/main/install.sh)
           \`\`\`
-          或: \`sudo dpkg -i linux-*.deb && sudo update-grub && sudo reboot\`
+          手动安装时请仅下载下列当前构建的镜像及配套头文件，并按发行版文档安装。
 
-          > Debian 11+ / Ubuntu 20.04+ · 安装后需重启"
+          > 支持 Debian 13 及以后版本 · 安装后需重启"
+
+            printf '%s\n' "$BODY" > "$RUNNER_TEMP/default-release-body.txt"
+            python3 scripts/build_provenance.py release-body \
+              --manifest "$RUNNER_TEMP/build-manifest.json" \
+              --release "$RUNNER_TEMP/release.json" \
+              --default-body "$RUNNER_TEMP/default-release-body.txt" > "$RUNNER_TEMP/release-body.txt"
 
             curl -sf -X PATCH \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}" \
-              -d "$(jq -n --arg body "$BODY" '{body: $body}')"
-            echo "已更新 Release 说明"
-          fi
+              -d "$(jq -n --rawfile body "$RUNNER_TEMP/release-body.txt" '{body: $body}')"
+            echo "已验证资源并更新当前构建记录；旧资源保持可用"
 
       - name: 🧹 清理旧 ccache 缓存条目
         if: always() && inputs.publish == true

@@ -86,6 +86,48 @@ class BuildProfilesTest(unittest.TestCase):
             standard.replace('CONFIG_LOCALVERSION=""', 'CONFIG_LOCALVERSION="-aggressive"', 1).splitlines(),
         )
 
+    def test_missing_bbrv3_stops_before_build(self):
+        lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+        start = next(i for i, line in enumerate(lines) if "验证 BBRv3 内置" in line)
+        start = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "run: |")
+        body = []
+        for line in lines[start + 1:]:
+            if not line.strip():
+                body.append("")
+            elif line.startswith("          "):
+                body.append(line[10:])
+            else:
+                break
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "net/ipv4/tcp_bbr.c"
+            source.parent.mkdir(parents=True)
+            env = dict(os.environ, GITHUB_ENV=str(root / "env"))
+            source.write_text("#define BBR_VERSION 1\n")
+            failed = subprocess.run(["bash", "-c", "\n".join(body)], cwd=root, env=env, capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("无法确认 BBRv3", failed.stdout)
+            source.write_text("#define BBR_VERSION 3\n")
+            passed = subprocess.run(["bash", "-c", "\n".join(body)], cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+
+    def test_missing_required_effective_config_stops_build(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        start = text.index("          for required in ", text.index("# These are product guarantees"))
+        end = text.index("          done", start) + len("          done")
+        check = "\n".join(line[10:] for line in text[start:end].splitlines())
+        required = ['CONFIG_TCP_CONG_BBR=y', 'CONFIG_DEFAULT_TCP_CONG="bbr"', 'CONFIG_NET_SCH_FQ=y',
+                    'CONFIG_DEFAULT_NET_SCH="fq"', 'CONFIG_DEBUG_INFO_BTF=y']
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / ".config"
+            config.write_text("\n".join(required) + "\n")
+            passed = subprocess.run(["bash", "-c", check], cwd=directory, capture_output=True, text=True)
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            config.write_text("\n".join(required[:-1]) + "\n")
+            failed = subprocess.run(["bash", "-c", check], cwd=directory, capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("CONFIG_DEBUG_INFO_BTF=y", failed.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

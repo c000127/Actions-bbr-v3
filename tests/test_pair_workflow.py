@@ -11,6 +11,10 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/build-pair.yml"
+SOURCE = "a" * 40
+import sys
+sys.path.insert(0, str(ROOT / "scripts"))
+from build_provenance import fingerprint
 
 
 def discovery_step():
@@ -29,10 +33,19 @@ def discovery_step():
 
 
 def published(kernel_release):
-    return {"draft": False, "assets": [
-        {"name": f"linux-{kind}-{kernel_release}_1_amd64.deb", "state": "uploaded", "size": 1}
-        for kind in ("image", "headers")
-    ]}
+    build_id = fingerprint("7.3.0-xanmod1", SOURCE)
+    if "-aggressive-xanmod" in kernel_release:
+        kernel_release = kernel_release.replace("-aggressive-xanmod", f"-b{build_id[:10]}r123a1-aggressive-xanmod")
+    else:
+        kernel_release = kernel_release.replace("-xanmod", f"-b{build_id[:10]}r123a1-xanmod")
+    assets = [{"name": f"linux-{kind}-{kernel_release}_1_amd64.deb", "state": "uploaded", "size": 1}
+              for kind in ("image", "headers")]
+    manifest = {"schema": 1, "profile": "aggressive" if "-aggressive-" in kernel_release else "standard",
+                "source_tag": "7.3.0-xanmod1", "source_commit": SOURCE, "project_commit": "b" * 40,
+                "fingerprint": build_id, "kernel_release": kernel_release,
+                "assets": {kind: {"name": assets[i]["name"], "size": 1, "sha256": "c" * 64}
+                           for i, kind in enumerate(("image", "headers"))}}
+    return {"draft": False, "assets": assets, "body": f"<!-- BBR_BUILD_V1 {json.dumps(manifest)} -->"}
 
 
 class PairWorkflowTest(unittest.TestCase):
@@ -44,7 +57,7 @@ class PairWorkflowTest(unittest.TestCase):
             (root / "standard.json").write_text(json.dumps(standard))
             (root / "aggressive.json").write_text(json.dumps(aggressive))
             scripts = {
-                "git": "#!/bin/sh\nprintf 'abc refs/tags/%s\\n' \"$MOCK_TAG\"\n",
+                "git": "#!/bin/sh\ncase \"$*\" in *'^{}'*) exit 0;; esac\nprintf '%s refs/tags/%s\\n' \"$MOCK_SHA\" \"$MOCK_TAG\"\n",
                 "sleep": "#!/bin/sh\nexit 0\n",
                 "curl": """#!/bin/sh
 out= url=
@@ -72,6 +85,7 @@ printf '%s' "$MOCK_STATUS"
             env.update(
                 PATH=str(mock_bin) + os.pathsep + env["PATH"],
                 MOCK_TAG=tag,
+                MOCK_SHA=SOURCE,
                 MOCK_STATUS=status,
                 MOCK_STANDARD=str(root / "standard.json"),
                 MOCK_AGGRESSIVE=str(root / "aggressive.json"),

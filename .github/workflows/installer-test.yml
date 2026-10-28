@@ -11,14 +11,19 @@ on:
       - tests/test_build_profiles.py
       - tests/test_pair_build.py
       - tests/test_pair_workflow.py
+      - tests/test_build_provenance.py
+      - tests/test_release_assets.py
+      - tests/test_benchmark_summary.py
       - tests/bench-bbr-loss.sh
       - tests/build-bbraggr-module.sh
       - tests/summarize-bbr-loss.py
       - scripts/apply-aggressive-bbr.py
       - scripts/plan-pair-build.py
+      - scripts/build_provenance.py
       - .github/workflows/CompatibilityTest.yml
       - .github/workflows/build.yml
       - .github/workflows/build-pair.yml
+      - x86-64.config
       - x86-64-aggressive.config
       - .github/workflows/installer-test.yml
   pull_request:
@@ -30,14 +35,19 @@ on:
       - tests/test_build_profiles.py
       - tests/test_pair_build.py
       - tests/test_pair_workflow.py
+      - tests/test_build_provenance.py
+      - tests/test_release_assets.py
+      - tests/test_benchmark_summary.py
       - tests/bench-bbr-loss.sh
       - tests/build-bbraggr-module.sh
       - tests/summarize-bbr-loss.py
       - scripts/apply-aggressive-bbr.py
       - scripts/plan-pair-build.py
+      - scripts/build_provenance.py
       - .github/workflows/CompatibilityTest.yml
       - .github/workflows/build.yml
       - .github/workflows/build-pair.yml
+      - x86-64.config
       - x86-64-aggressive.config
       - .github/workflows/installer-test.yml
 
@@ -61,3 +71,6 @@ jobs:
           python3 tests/test_build_profiles.py
           python3 tests/test_pair_build.py
           python3 tests/test_pair_workflow.py
+          python3 tests/test_build_provenance.py
+          python3 tests/test_release_assets.py
+          python3 tests/test_benchmark_summary.py

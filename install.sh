@@ -17,7 +17,7 @@ fi
 # ── 环境检查 ──────────────────────────────────────────────
 
 if ! command -v apt-get &>/dev/null; then
-    echo -e "${UI_RED}此脚本仅支持 Debian/Ubuntu 系统${UI_RESET}"
+    echo -e "${UI_RED}此脚本需要 apt；项目支持 Debian 13 及以后版本${UI_RESET}"
     exit 1
 fi
 
@@ -64,6 +64,8 @@ AGGRESSIVE_LEGACY_CONF="${BBRV3_AGGRESSIVE_LEGACY_CONF:-/etc/xanmod-bbr/aggressi
 AGGRESSIVE_HELPER="${BBRV3_AGGRESSIVE_HELPER:-/usr/local/lib/xanmod-bbr/apply-aggressive.sh}"
 AGGRESSIVE_UNIT="${BBRV3_AGGRESSIVE_UNIT:-/etc/systemd/system/xanmod-aggressive-bbr.service}"
 AGGRESSIVE_MARKER='# Managed by Actions-bbr-v3 aggressive profile'
+MANAGED_PACKAGES="${BBRV3_MANAGED_PACKAGES:-/var/lib/xanmod-bbr/managed-packages}"
+MANAGED_MARKER='# Managed by Actions-bbr-v3 package registry'
 DOWNLOAD_DIR=$(mktemp -d) || { echo -e "${UI_RED}无法创建临时下载目录${UI_RESET}" >&2; exit 1; }
 trap 'rm -rf -- "$DOWNLOAD_DIR"' EXIT
 
@@ -73,12 +75,77 @@ get_installed_packages() {
     local profile="${1:-standard}"
     dpkg-query -W -f='${db:Status-Status}\t${binary:Package}\n' 'linux-image-*' 2>/dev/null \
         | awk -F '\t' -v brand="$KERNEL_BRAND" -v profile="$profile" '
-            $1 == "installed" && index($2, brand) && $2 !~ /-dbg(:.*)?$/ {
+            $1 == "installed" {
                 name = $2
                 sub(/:.*/, "", name)
+                # Upstream x64v2/x64v3 and other third-party XanMod variants
+                # do not use this project package naming pattern.
+                if (name !~ /^linux-image-(unsigned-)?[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?(-b[0-9a-f]{10}r[0-9a-f]+a[0-9]+)?(-aggressive)?-xanmod[0-9]+$/) next
                 aggressive = (name ~ /-aggressive-xanmod[0-9]+$/)
                 if ((profile == "aggressive" && aggressive) || (profile == "standard" && !aggressive)) print $2
             }' || true
+}
+
+get_managed_packages() {
+    if "${SUDO[@]}" test -L "$MANAGED_PACKAGES" || \
+       ! "${SUDO[@]}" test -f "$MANAGED_PACKAGES" || \
+       ! "${SUDO[@]}" grep -Fxq "$MANAGED_MARKER" "$MANAGED_PACKAGES"; then
+        return 0
+    fi
+    "${SUDO[@]}" cat "$MANAGED_PACKAGES" | awk -F '\t' \
+        '($1 == "standard" || $1 == "aggressive") && $2 ~ /^linux-(image|headers)-[a-zA-Z0-9.+-]+$/ { print $1 "\t" $2 }'
+}
+
+write_managed_packages() {
+    local source=$1 staged="${MANAGED_PACKAGES}.tmp.$$"
+    if "${SUDO[@]}" test -e "$staged" || "${SUDO[@]}" test -L "$staged"; then
+        return 1
+    fi
+    if ! "${SUDO[@]}" install -D -m 0644 "$source" "$staged"; then
+        "${SUDO[@]}" rm -f -- "$staged" || true
+        return 1
+    fi
+    if "${SUDO[@]}" test -L "$MANAGED_PACKAGES" || ! "${SUDO[@]}" mv -f -- "$staged" "$MANAGED_PACKAGES"; then
+        "${SUDO[@]}" rm -f -- "$staged" || true
+        return 1
+    fi
+}
+
+record_managed_packages() {
+    local profile=$1 package temp="$DOWNLOAD_DIR/managed-packages"
+    shift
+    if "${SUDO[@]}" test -L "$MANAGED_PACKAGES" || \
+       { "${SUDO[@]}" test -e "$MANAGED_PACKAGES" && ! "${SUDO[@]}" grep -Fxq "$MANAGED_MARKER" "$MANAGED_PACKAGES"; }; then
+        echo -e "${UI_YELLOW}包记录文件不属于本项目或是符号链接，未覆盖: $MANAGED_PACKAGES${UI_RESET}" >&2
+        return 1
+    fi
+    get_managed_packages > "$temp.existing" || return 1
+    {
+        cat "$temp.existing"
+        for package in "$@"; do
+            [[ "$package" =~ ^linux-(image|headers)-[a-zA-Z0-9.+-]+$ ]] || continue
+            printf '%s\t%s\n' "$profile" "$package"
+        done
+    } | LC_ALL=C sort -u > "$temp.entries" || return 1
+    { printf '%s\n' "$MANAGED_MARKER"; cat "$temp.entries"; } > "$temp" || return 1
+    write_managed_packages "$temp"
+}
+
+forget_managed_packages() {
+    local temp="$DOWNLOAD_DIR/managed-packages" package
+    [[ $# -gt 0 ]] || return 0
+    if "${SUDO[@]}" test -L "$MANAGED_PACKAGES" || \
+       ! "${SUDO[@]}" test -f "$MANAGED_PACKAGES" || \
+       ! "${SUDO[@]}" grep -Fxq "$MANAGED_MARKER" "$MANAGED_PACKAGES"; then
+        return 0
+    fi
+    get_managed_packages > "$temp.entries" || return 1
+    for package in "$@"; do
+        awk -F '\t' -v package="${package%%:*}" '$2 != package' "$temp.entries" > "$temp.next" || return 1
+        mv "$temp.next" "$temp.entries" || return 1
+    done
+    { printf '%s\n' "$MANAGED_MARKER"; cat "$temp.entries"; } > "$temp" || return 1
+    write_managed_packages "$temp"
 }
 
 get_installed_version() {
@@ -86,7 +153,7 @@ get_installed_version() {
     while IFS= read -r pkg; do
         [[ -z "$pkg" ]] && continue
         pkg=${pkg%%:*}
-        version=$(echo "$pkg" | sed -E 's/^linux-image-(unsigned-)?//; s/-aggressive-xanmod[0-9]+.*$//; s/-xanmod[0-9]+.*$//')
+        version=$(echo "$pkg" | sed -E 's/^linux-image-(unsigned-)?//; s/-aggressive-xanmod[0-9]+.*$//; s/-xanmod[0-9]+.*$//; s/-b[0-9a-f]{10}r[0-9a-f]+a[0-9]+$//')
         printf '%s\t%s\n' "$(version_sort_key "$version")" "$version"
     done < <(get_installed_packages "$profile") | sort -r | cut -f2 | head -n 1
     return 0
@@ -112,6 +179,9 @@ get_xanmod_revision() {
             candidate=${candidate%-aggressive}
         else
             [[ "$candidate" != *-aggressive ]] || continue
+        fi
+        if [[ "$candidate" =~ ^(.+)-b[0-9a-f]{10}r[0-9a-f]+a[0-9]+$ ]]; then
+            candidate=${BASH_REMATCH[1]}
         fi
         [[ "$(normalize_version "$candidate")" == "$(normalize_version "$version")" ]] || continue
         if [[ -z "$highest" ]] || (( revision > highest )); then
@@ -142,7 +212,7 @@ version_sort_key() {
 
 # Show the actual Debian image names, including the XanMod revision.
 get_installed_kernels() {
-    local profile="${1:-standard}" pkg kernel version revision
+    local profile="${1:-standard}" pkg kernel version revision build_run build_attempt
     while IFS= read -r pkg; do
         [[ -z "$pkg" ]] && continue
         pkg=${pkg%%:*}
@@ -150,12 +220,20 @@ get_installed_kernels() {
         kernel=${kernel#unsigned-}
         version=${kernel%-xanmod*}
         version=${version%-aggressive}
+        if [[ "$version" =~ ^(.+)-b[0-9a-f]{10}r[0-9a-f]+a[0-9]+$ ]]; then
+            version=${BASH_REMATCH[1]}
+        fi
         revision=0
         if [[ "$kernel" =~ -xanmod([0-9]{1,6})$ ]]; then
             revision=$((10#${BASH_REMATCH[1]}))
         fi
-        printf '%s\t%06d\t%s\n' "$(version_sort_key "$version")" "$revision" "$kernel"
-    done < <(get_installed_packages "$profile") | LC_ALL=C sort -ru | cut -f3
+        build_run=0; build_attempt=0
+        if [[ "$kernel" =~ -b[0-9a-f]{10}r([0-9a-f]+)a([0-9]+)(-aggressive)?-xanmod[0-9]+$ ]]; then
+            build_run=$((16#${BASH_REMATCH[1]}))
+            build_attempt=$((10#${BASH_REMATCH[2]}))
+        fi
+        printf '%s\t%06d\t%020d\t%06d\t%s\n' "$(version_sort_key "$version")" "$revision" "$build_run" "$build_attempt" "$kernel"
+    done < <(get_installed_packages "$profile") | LC_ALL=C sort -ru | cut -f5
     return 0
 }
 
@@ -166,9 +244,9 @@ profile_label() {
 # Identify the running profile from uname, never from the newest installed image.
 running_profile() {
     local kernel="${1:-}"
-    if [[ "$kernel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?-aggressive-xanmod[0-9]+$ ]]; then
+    if [[ "$kernel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?(-b[0-9a-f]{10}r[0-9a-f]+a[0-9]+)?-aggressive-xanmod[0-9]+$ ]]; then
         printf 'aggressive'
-    elif [[ "$kernel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?-xanmod[0-9]+$ ]]; then
+    elif [[ "$kernel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?(-rc[0-9]+)?(-b[0-9a-f]{10}r[0-9a-f]+a[0-9]+)?-xanmod[0-9]+$ ]]; then
         printf 'standard'
     else
         printf 'unknown'
@@ -247,6 +325,42 @@ get_release_prefix() {
     fi
 }
 
+# A published manifest is the atomic pointer to a complete build. Uploaded
+# assets from an interrupted build are ignored until that pointer changes.
+get_release_assets() {
+    local tag=$1 release_data=$2
+    if ! printf '%s\n' "$release_data" | jq -er --arg tag "$tag" '
+        def selected($release; $entry):
+            if (($entry.name | type) != "string") or
+               (($entry.sha256 | type) != "string") or
+               (($entry.sha256 | test("^[0-9a-f]{64}$")) | not) or
+               (($entry.size | type) != "number") then error("invalid manifest asset") else . end |
+            [$release.assets[] | select(.name == $entry.name and .state == "uploaded" and .size == $entry.size)] |
+            if length != 1 then error("missing manifest asset") else .[0] end |
+            [.browser_download_url, $entry.sha256] | @tsv;
+        [.[] | select(.tag_name == $tag)] |
+        (if length != 1 then error("release not found") else .[0] end) as $release |
+        if (($release.body // "") | contains("<!-- BBR_BUILD_V1 ")) then
+            (($release.body | capture("<!-- BBR_BUILD_V1 (?<json>[^\\r\\n]*) -->").json) | fromjson) as $m |
+            if $m.schema != 1 or ($m.assets | type) != "object" then error("invalid build manifest") else . end |
+            selected($release; $m.assets.image), selected($release; $m.assets.headers)
+        else
+            [$release.assets[] | select(.state == "uploaded") |
+                select((.name | test("-build[0-9]+a[0-9]+_amd64\\.deb$")) | not)] as $legacy |
+            ([$legacy[] | select(.name | test("^linux-image-(unsigned-)?[0-9]+\\.[0-9]+(\\.[0-9]+)?(-rc[0-9]+)?(-aggressive)?-xanmod[0-9]+_.*_amd64\\.deb$"))] |
+                sort_by(.name | capture("-xanmod(?<revision>[0-9]+)_").revision | tonumber) | last) as $image |
+            if $image == null then error("no complete legacy image") else . end |
+            ($image.name | capture("^linux-image-(?:unsigned-)?(?<kernel>[^_]+)_").kernel) as $kernel |
+            ([$legacy[] | select(.name | startswith("linux-headers-" + $kernel + "_"))] | sort_by(.name) | last) as $headers |
+            ([$image.browser_download_url, "-"] | @tsv),
+            (if $headers == null then empty else [$headers.browser_download_url, "-"] | @tsv end)
+        end
+    '; then
+        echo -e "${UI_RED}Release 的构建记录或资源不完整，已保留当前内核。${UI_RESET}" >&2
+        return 1
+    fi
+}
+
 configure_aggressive_bbr() {
     local target current_algo current_qdisc running_kernel legacy_managed=0 config_source
     # Do not replace files that another administrator or program owns.
@@ -295,8 +409,8 @@ if systemctl is-active --quiet skyline-speederd.service || \
 fi
 current=$(sysctl -n net.ipv4.tcp_congestion_control)
 case "$current" in
-    bbr|cubic|reno) ;;
-    *) echo "Custom congestion control $current is active; leaving it unchanged."; exit 0 ;;
+    bbr) ;;
+    *) echo "Congestion control $current may be managed elsewhere; leaving it unchanged."; exit 0 ;;
 esac
 available=$(sysctl -n net.ipv4.tcp_available_congestion_control)
 if [[ " $available " != *" bbr "* ]]; then
@@ -354,8 +468,8 @@ EOF
     if systemctl is-active --quiet skyline-speederd.service || \
        systemctl is-active --quiet skyline-speeder-enable.service; then
         echo -e "${UI_YELLOW}  检测到 Skyline 正在运行，已保留其拥塞控制${UI_RESET}"
-    elif [[ -n "$current_algo" && "$current_algo" != bbr && "$current_algo" != cubic && "$current_algo" != reno ]]; then
-        echo -e "${UI_YELLOW}  检测到其他拥塞算法 $current_algo，已保留现有设置${UI_RESET}"
+    elif [[ -n "$current_algo" && "$current_algo" != bbr ]]; then
+        echo -e "${UI_YELLOW}  检测到其他拥塞算法 $current_algo，已保留现有设置；如确认没有其他服务管理，可在菜单中手动启用 BBR${UI_RESET}"
     elif [[ ! "$running_kernel" =~ -aggressive-xanmod[0-9]+$ ]]; then
         echo -e "${UI_CYAN}  配置将在启动激进内核后重新检查${UI_RESET}"
     elif [[ "$current_algo" != bbr ]]; then
@@ -399,10 +513,9 @@ remove_aggressive_bbr_config() {
 
 download_and_install() {
     local tag="$1" release_data="$2" profile="${3:-standard}"
-    local urls url deb package_name pkg pkg_name running_kernel keep downloaded=0
-    local -a old_pkgs=() image_pkgs=() remove_pkgs=()
-    urls=$(echo "$release_data" | jq -r --arg tag "$tag" \
-        '.[] | select(.tag_name == $tag) | .assets[].browser_download_url')
+    local urls url digest actual deb package_name kernel_name header_name downloaded=0
+    local -a image_pkgs=() header_pkgs=() selected_headers=()
+    urls=$(get_release_assets "$tag" "$release_data") || return 1
 
     if [[ -z "$urls" ]]; then
         echo -e "${UI_RED}该 Release 没有可下载的资源${UI_RESET}"
@@ -410,12 +523,19 @@ download_and_install() {
     fi
 
     rm -f "$DOWNLOAD_DIR"/linux-*.deb
-    while IFS= read -r url; do
+    while IFS=$'\t' read -r url digest; do
         [[ -z "$url" || "$url" == *"linux-libc-dev"* ]] && continue
         echo -e "${UI_CYAN}下载: $(basename "$url")${UI_RESET}"
         if ! wget --https-only --timeout=30 --tries=3 -q --show-progress "$url" -P "$DOWNLOAD_DIR"/; then
             echo -e "${UI_RED}下载失败，保留当前已安装内核${UI_RESET}"
             return 1
+        fi
+        if [[ -n "$digest" && "$digest" != '-' ]]; then
+            actual=$(sha256sum "$DOWNLOAD_DIR/${url##*/}") || return 1
+            if [[ ! "$digest" =~ ^[0-9a-f]{64}$ || "${actual%% *}" != "$digest" ]]; then
+                echo -e "${UI_RED}下载文件的 SHA-256 不匹配，保留当前已安装内核${UI_RESET}" >&2
+                return 1
+            fi
         fi
         downloaded=$((downloaded + 1))
     done <<< "$urls"
@@ -441,6 +561,7 @@ download_and_install() {
                 fi
                 image_pkgs+=("$package_name")
                 ;;
+            linux-headers-*) header_pkgs+=("$package_name") ;;
         esac
     done
     if [[ ${#image_pkgs[@]} -eq 0 ]]; then
@@ -448,36 +569,23 @@ download_and_install() {
         return 1
     fi
 
-    # 先记录旧包；新包安装成功前绝不删除它们。
-    mapfile -t old_pkgs < <(get_installed_packages "$profile")
-
     echo -e "${UI_CYAN}安装内核...${UI_RESET}"
-    echo "  安装成功后会清理同一配置中未运行的旧镜像；运行中及本次安装的镜像会保留。"
+    echo "  已安装的其他内核会保留，以便重启后回退。"
     if ! "${SUDO[@]}" dpkg -i "$DOWNLOAD_DIR"/linux-*.deb; then
         echo -e "${UI_RED}安装未完成，未执行旧内核清理；请检查上方 dpkg 输出。${UI_RESET}"
         return 1
     fi
 
-    # 新包安装后只清理未运行的旧版；运行中的内核和本次安装的镜像均保留。
-    if running_kernel=$(uname -r) && [[ -n "$running_kernel" ]]; then
-        for pkg in "${old_pkgs[@]}"; do
-            pkg_name=${pkg%%:*}
-            [[ "$pkg_name" == "linux-image-$running_kernel" || "$pkg_name" == "linux-image-unsigned-$running_kernel" ]] && continue
-            keep=0
-            for package_name in "${image_pkgs[@]}"; do
-                [[ "$pkg_name" == "$package_name" ]] && keep=1 && break
-            done
-            [[ $keep -eq 0 ]] && remove_pkgs+=("$pkg")
+    # Only record headers that correspond to an image installed by this run.
+    for package_name in "${image_pkgs[@]}"; do
+        kernel_name=${package_name#linux-image-}
+        kernel_name=${kernel_name#unsigned-}
+        for header_name in "${header_pkgs[@]}"; do
+            [[ "$header_name" == "linux-headers-$kernel_name" ]] && selected_headers+=("$header_name")
         done
-    else
-        echo -e "${UI_YELLOW}无法确定运行中的内核，跳过旧内核清理${UI_RESET}"
-    fi
-    if [[ ${#remove_pkgs[@]} -gt 0 ]]; then
-        if "${SUDO[@]}" apt-get remove --purge -y -- "${remove_pkgs[@]}" >/dev/null; then
-            echo -e "${UI_CYAN}已清理旧镜像: ${remove_pkgs[*]}${UI_RESET}"
-        else
-            echo -e "${UI_YELLOW}旧内核清理失败，请在确认新内核可启动后手动处理${UI_RESET}"
-        fi
+    done
+    if ! record_managed_packages "$profile" "${image_pkgs[@]}" "${selected_headers[@]}"; then
+        echo -e "${UI_YELLOW}内核已安装，但无法记录包来源；以后卸载时会要求确认。${UI_RESET}"
     fi
 
     echo -e "${UI_BOLD_GREEN}━━━━━━ 安装完成 ━━━━━━${UI_RESET}"
@@ -587,11 +695,17 @@ do_install_latest() {
     latest_tag=$(echo "$tags" | head -1)
 
     local version="${latest_tag#"$arch_filter"-}"
-    local installed installed_kernel installed_revision='' release_revision='' ans
+    local installed installed_kernel installed_revision='' release_revision='' release_assets release_url release_image_pkg='' ans
     installed=$(get_installed_version "$profile")
     installed_kernel=$(get_installed_kernels "$profile" | head -n 1)
-    release_revision=$(echo "$data" | jq -r --arg tag "$latest_tag" \
-        '.[] | select(.tag_name == $tag) | .assets[].browser_download_url' | get_xanmod_revision "$version" "$profile")
+    release_assets=$(get_release_assets "$latest_tag" "$data") || return 1
+    release_revision=$(printf '%s\n' "$release_assets" | cut -f1 | get_xanmod_revision "$version" "$profile")
+    while IFS=$'\t' read -r release_url _; do
+        release_image_pkg=${release_url##*/}
+        [[ "$release_image_pkg" == linux-image-* ]] || continue
+        release_image_pkg=${release_image_pkg%%_*}
+        break
+    done <<< "$release_assets"
     echo -e "${UI_CYAN}最新可用: ${UI_BOLD_GREEN}$version${UI_RESET}${release_revision:+ / xanmod$release_revision}"
     echo -e "${UI_CYAN}已安装（最高版本）: ${UI_BOLD_GREEN}${installed_kernel:-无}${UI_RESET}"
 
@@ -601,11 +715,16 @@ do_install_latest() {
     if [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" && \
           -n "$installed_revision" && -n "$release_revision" ]] && (( release_revision > installed_revision )); then
         echo -e "${UI_CYAN}发现 XanMod 修订更新: xanmod${installed_revision} → xanmod${release_revision}${UI_RESET}"
+    elif [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" && \
+            -n "$installed_revision" && "$installed_revision" == "$release_revision" && \
+            "$release_image_pkg" =~ -b[0-9a-f]{10}r[0-9a-f]+a[0-9]+(-aggressive)?-xanmod[0-9]+$ ]] && \
+         ! get_installed_packages "$profile" | cut -d: -f1 | grep -Fx "$release_image_pkg" >/dev/null; then
+        echo -e "${UI_CYAN}发现相同 Linux 版本的新构建: $release_image_pkg；当前内核会保留。${UI_RESET}"
     elif [[ -n "$installed" && "$installed" == "$(normalize_version "$version")" ]]; then
         if [[ -n "$installed_revision" && -n "$release_revision" ]] && (( installed_revision > release_revision )); then
             echo -e "${UI_YELLOW}已安装的修订 xanmod${installed_revision} 高于 Release 的 xanmod${release_revision}；继续会安装较旧修订。${UI_RESET}"
         elif [[ -n "$installed_revision" && -n "$release_revision" ]]; then
-            echo -e "${UI_BOLD_GREEN}已是最新版本（修订 xanmod${installed_revision}）${UI_RESET}"
+            echo -e "${UI_BOLD_GREEN}已安装相同 Linux 版本和修订 xanmod${installed_revision}；未比较构建内容。${UI_RESET}"
         else
             echo -e "${UI_YELLOW}已安装相同 Linux 版本，但无法确认 XanMod 修订是否相同。${UI_RESET}"
         fi
@@ -744,53 +863,99 @@ do_check_status() {
 }
 
 do_uninstall() {
-    local profile="${1:-standard}" other_profile running pkg pkg_name ans removing_running=0
-    local -a pkgs=()
+    local profile="${1:-standard}" running pkg pkg_name kernel header installed_header installed_image managed installed_headers installed_images ans removing_running=0 unverified=0 image_found
+    local -a pkgs=() headers=() removed=()
     mapfile -t pkgs < <(get_installed_packages "$profile")
-    if [[ ${#pkgs[@]} -eq 0 ]]; then
-        echo -e "${UI_YELLOW}未找到已安装的$(profile_label "$profile")内核${UI_RESET}"
+    running=$(uname -r 2>/dev/null || true)
+    managed=$(get_managed_packages)
+    installed_headers=$(dpkg-query -W -f='${db:Status-Status}\t${binary:Package}\n' 'linux-headers-*' 2>/dev/null \
+        | awk -F '\t' '$1 == "installed" { print $2 }' || true)
+    if [[ -n "$running" ]] && installed_images=$(dpkg-query -W -f='${db:Status-Status}\t${binary:Package}\n' 'linux-image-*' 2>/dev/null \
+        | awk -F '\t' '$1 == "installed" && $2 ~ /^linux-image-/ { print $2 }'); then
+        # A previous uninstall may have kept the running kernel headers. Offer
+        # them only after reboot, once no corresponding image remains.
+        while IFS=$'\t' read -r record_profile header; do
+            [[ "$record_profile" == "$profile" && "$header" == linux-headers-* ]] || continue
+            kernel=${header#linux-headers-}
+            [[ "$kernel" != "$running" ]] || continue
+            image_found=0
+            while IFS= read -r installed_image; do
+                pkg_name=${installed_image%%:*}
+                if [[ "$pkg_name" == "linux-image-$kernel" || "$pkg_name" == "linux-image-unsigned-$kernel" ]]; then
+                    image_found=1; break
+                fi
+            done <<< "$installed_images"
+            [[ "$image_found" -eq 0 ]] || continue
+            while IFS= read -r installed_header; do
+                [[ "${installed_header%%:*}" == "$header" ]] && headers+=("$installed_header") && break
+            done <<< "$installed_headers"
+        done <<< "$managed"
+    fi
+    if [[ ${#pkgs[@]} -eq 0 && ${#headers[@]} -eq 0 ]]; then
+        echo -e "${UI_YELLOW}未找到已安装的$(profile_label "$profile")内核或可清理的已记录头文件${UI_RESET}"
         return
     fi
-    running=$(uname -r 2>/dev/null || true)
-    if [[ "$profile" == aggressive ]]; then other_profile=standard; else other_profile=aggressive; fi
-    echo -e "${UI_CYAN}将卸载以下$(profile_label "$profile")镜像包:${UI_RESET}"
+    [[ -n "$running" ]] || echo -e "${UI_YELLOW}无法确认运行中内核，跳过头文件清理。${UI_RESET}"
+    if [[ ${#pkgs[@]} -gt 0 ]]; then
+        echo -e "${UI_CYAN}将卸载以下$(profile_label "$profile")镜像包:${UI_RESET}"
+    else
+        echo -e "${UI_CYAN}未找到$(profile_label "$profile")镜像，可清理以下已记录头文件。${UI_RESET}"
+    fi
     for pkg in "${pkgs[@]}"; do
         pkg_name=${pkg%%:*}
+        if ! printf '%s\n' "$managed" | grep -Fxq "$profile"$'\t'"$pkg_name"; then
+            unverified=1
+            echo -e "  ${UI_YELLOW}$pkg（历史安装，无法确认来源）${UI_RESET}"
+        elif [[ "$pkg_name" != "linux-image-$running" && "$pkg_name" != "linux-image-unsigned-$running" ]]; then
+            echo "  $pkg（本项目记录）"
+        fi
         if [[ "$pkg_name" == "linux-image-$running" || "$pkg_name" == "linux-image-unsigned-$running" ]]; then
             removing_running=1
             echo -e "  ${UI_YELLOW}$pkg（当前正在运行）${UI_RESET}"
-        else
-            echo "  $pkg"
+            continue
+        fi
+        kernel=${pkg_name#linux-image-}; kernel=${kernel#unsigned-}
+        header="linux-headers-$kernel"
+        if [[ -n "$running" ]] && printf '%s\n' "$managed" | grep -Fxq "$profile"$'\t'"$header"; then
+            while IFS= read -r installed_header; do
+                [[ "${installed_header%%:*}" == "$header" ]] && headers+=("$installed_header") && break
+            done <<< "$installed_headers"
         fi
     done
+    [[ "$unverified" -eq 1 ]] && echo -e "${UI_YELLOW}未记录来源的历史内核仅按名称识别；确认后才会卸载，请仔细核对。${UI_RESET}"
+    if [[ ${#headers[@]} -gt 0 ]]; then
+        echo "  同时清理本项目记录、对应待卸载或已不存在的非运行镜像的头文件: ${headers[*]}"
+    fi
     if [[ "$removing_running" -eq 1 ]]; then
         echo -e "${UI_YELLOW}当前内核将运行至重启；请先确认系统有其他可启动内核。${UI_RESET}"
     else
         echo -e "${UI_YELLOW}请先确认系统有其他可启动内核。${UI_RESET}"
     fi
     [[ "$profile" == aggressive ]] && echo "  将尝试移除本项目管理的激进版自动 BBR 配置。"
-    if [[ -z "$(get_installed_packages "$other_profile")" ]]; then
-        echo "  另一配置未安装；共享配置 $SYSCTL_CONF 如存在也会删除。"
-    else
-        echo "  另一配置仍已安装，共享 BBR 配置会保留。"
-    fi
+    echo "  保留共享网络配置 $SYSCTL_CONF 及其中的其他设置。"
     echo -n -e "${UI_CYAN}确认卸载？(y/N): ${UI_RESET}"
     read -r ans || { echo ""; echo "已取消卸载。"; return 0; }
     if [[ "$ans" != y && "$ans" != Y ]]; then
         echo "已取消卸载。"
         return 0
     fi
-    if ! "${SUDO[@]}" apt-get remove --purge -y -- "${pkgs[@]}"; then
+    if [[ ${#pkgs[@]} -gt 0 ]] && ! "${SUDO[@]}" apt-get remove --purge -y -- "${pkgs[@]}"; then
         echo -e "${UI_RED}卸载未完成，未清理 BBR 配置；请检查上方 apt 输出。${UI_RESET}"
         return 1
     fi
+    removed=("${pkgs[@]}")
+    if [[ ${#headers[@]} -gt 0 ]]; then
+        if "${SUDO[@]}" apt-get remove --purge -y -- "${headers[@]}"; then
+            removed+=("${headers[@]}")
+        else
+            echo -e "${UI_YELLOW}镜像已卸载，但对应头文件未能清理；请手动检查。${UI_RESET}"
+        fi
+    fi
+    if ! forget_managed_packages "${removed[@]}"; then
+        echo -e "${UI_YELLOW}无法更新本项目包记录，请手动检查 $MANAGED_PACKAGES${UI_RESET}"
+    fi
     if [[ "$profile" == "aggressive" ]] && ! remove_aggressive_bbr_config; then
         echo -e "${UI_YELLOW}激进版配置清理不完整，请手动检查${UI_RESET}"
-    fi
-    if [[ -z "$(get_installed_packages "$other_profile")" ]]; then
-        "${SUDO[@]}" rm -f "$SYSCTL_CONF" || echo -e "${UI_YELLOW}无法删除 BBR 配置，请手动处理${UI_RESET}"
-    else
-        echo -e "${UI_CYAN}另一个配置仍已安装，保留共享的 BBR 配置${UI_RESET}"
     fi
     echo -e "${UI_BOLD_GREEN}$(profile_label "$profile")内核卸载完成。${UI_RESET}"
     [[ "$removing_running" -eq 1 ]] && echo -e "${UI_YELLOW}重启前请确认其他内核可启动。${UI_RESET}"

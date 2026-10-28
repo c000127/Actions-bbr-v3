@@ -183,18 +183,21 @@ done
 [[ $selected -gt 0 ]] || { echo "No scenario matched BENCH_CASE_FILTER" >&2; exit 1; }
 fi
 
-# Concurrent streams share the same router bottleneck. Begin without loss so
-# both control connections complete, then enable loss during iperf's omitted
-# warmup. The reported interval therefore measures the same impaired period.
+# Configure impairment before either connection starts. Replacing a qdisc after
+# connections are active drops queued packets and allows warmup data to cross
+# the measurement boundary. Failed handshakes are recorded, not hidden.
 if [[ ${BENCH_SHARED:-0} == 1 || ${BENCH_SHARED_ONLY:-0} == 1 ]]; then
     [[ ${#algorithms[@]} -eq 2 ]] || { echo "Shared test requires exactly two algorithms" >&2; exit 1; }
+    selected_shared=0
     for scenario in 'shared_total_30 16.33 16.33' 'shared_total_50 29.29 29.29'; do
         read -r name send_loss ack_loss <<< "$scenario"
+        [[ -z ${BENCH_SHARED_CASE_FILTER:-} || $name == "$BENCH_SHARED_CASE_FILTER" ]] || continue
+        selected_shared=$((selected_shared + 1))
         for ((iteration = 1; iteration <= REPEATS; iteration++)); do
             seed=$((3000 + iteration))
-            set_impairment 0 0 "$seed"
-            first_run="$name-${algorithms[0]}-$iteration"
-            second_run="$name-${algorithms[1]}-$iteration"
+            set_impairment "$send_loss" "$ack_loss" "$seed"
+            first_run="$name-${algorithms[0]}-$iteration-first"
+            second_run="$name-${algorithms[1]}-$iteration-second"
             ip netns exec "$server_ns" iperf3 -s -1 -p 5201 > "$OUT/$first_run-server.log" 2>&1 &
             server_pid=$!
             ip netns exec "$server_ns" iperf3 -s -1 -p 5202 > "$OUT/$second_run-server.log" 2>&1 &
@@ -202,15 +205,13 @@ if [[ ${BENCH_SHARED:-0} == 1 || ${BENCH_SHARED_ONLY:-0} == 1 ]]; then
             sleep 0.3
             echo "Running $name shared bottleneck, repeat $iteration"
             timeout "$((DURATION + 70))s" ip netns exec "$client_ns" iperf3 -c 198.18.0.6 -p 5201 \
-                -C "${algorithms[0]}" -O 5 -t "$DURATION" --connect-timeout 30000 -J \
+                -C "${algorithms[0]}" -t "$DURATION" --connect-timeout 30000 -J \
                 > "$OUT/$first_run.json" 2> "$OUT/$first_run.err" &
             first_client_pid=$!
             timeout "$((DURATION + 70))s" ip netns exec "$client_ns" iperf3 -c 198.18.0.6 -p 5202 \
-                -C "${algorithms[1]}" -O 5 -t "$DURATION" --connect-timeout 30000 -J \
+                -C "${algorithms[1]}" -t "$DURATION" --connect-timeout 30000 -J \
                 > "$OUT/$second_run.json" 2> "$OUT/$second_run.err" &
             second_client_pid=$!
-            sleep 2
-            set_impairment "$send_loss" "$ack_loss" "$seed"
             first_rc=0
             wait "$first_client_pid" || first_rc=$?
             second_rc=0
@@ -228,5 +229,6 @@ if [[ ${BENCH_SHARED:-0} == 1 || ${BENCH_SHARED_ONLY:-0} == 1 ]]; then
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$send_loss" "$ack_loss" "${algorithms[1]}" "$iteration" "$second_rc" "$second_run.json" >> "$OUT/results.tsv"
         done
     done
+    [[ $selected_shared -gt 0 ]] || { echo "No scenario matched BENCH_SHARED_CASE_FILTER" >&2; exit 1; }
 fi
 echo "Results saved in $OUT"

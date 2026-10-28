@@ -162,6 +162,7 @@ export BBRV3_AGGRESSIVE_CONF="$TEST_DIR/aggressive/config.profile"
 export BBRV3_AGGRESSIVE_LEGACY_CONF="$TEST_DIR/aggressive/legacy.conf"
 export BBRV3_AGGRESSIVE_HELPER="$TEST_DIR/aggressive/apply.sh"
 export BBRV3_AGGRESSIVE_UNIT="$TEST_DIR/aggressive/xanmod-aggressive-bbr.service"
+export BBRV3_MANAGED_PACKAGES="$TEST_DIR/registry/managed-packages"
 export TEST_RUNNING=7.2.1-xanmod1
 export TMPDIR="$TEST_DIR/tmp"
 
@@ -175,6 +176,7 @@ reset_fixture() {
     TEST_RUNNING=7.2.1-xanmod1
     rm -f "$BBRV3_SYSCTL_CONF" "$TEST_DIR/algorithm" "$TEST_DIR/tee-content"
     rm -rf "$TEST_DIR/aggressive"
+    rm -rf "$TEST_DIR/registry"
     unset TEST_APT_UPDATE_FAIL TEST_APT_REMOVE_FAIL TEST_MISSING_DEP TEST_DPKG_FAIL TEST_DEB_FAIL TEST_CURL_FAIL TEST_WGET_FAIL TEST_TEE_FAIL TEST_ALGO TEST_QDISC TEST_BBR_VERSION TEST_SKYLINE_ACTIVE TEST_AVAILABLE TEST_SYSCTL_FAIL TEST_SYSCTL_OVERRIDE TEST_SYSTEMCTL_FAIL TEST_EXECUTE_START TEST_ARCH
 }
 
@@ -211,12 +213,30 @@ reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.0-xanmod1 > "$TEST_PACKAGES"
 run_installer '1\nn\n\n0\n'
 assert_log_contains 'dpkg -i '
-assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.0-xanmod1'
+assert_log_not_contains 'apt-get remove'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains 'sysctl -w'
 assert_log_not_contains 'tee '
 assert_output_contains '新内核:'
-echo 'PASS: upgrade retains the running kernel without changing network settings'
+echo 'PASS: upgrade retains previous kernels without changing network settings'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.6-x64v3-xanmod1 > "$TEST_PACKAGES"
+run_installer '1\nn\n\n0\n'
+assert_log_not_contains 'apt-get remove'
+assert_output_not_contains '已安装标准版（最高）: 7.2.6-x64v3-xanmod1'
+grep -Fxq $'standard\tlinux-image-7.2.12-xanmod1' "$BBRV3_MANAGED_PACKAGES"
+grep -Fxq $'standard\tlinux-headers-7.2.12-xanmod1' "$BBRV3_MANAGED_PACKAGES"
+echo 'PASS: third-party XanMod images are excluded and newly installed packages are recorded'
+
+reset_fixture
+mkdir -p "$TEST_DIR/registry"
+printf '%s\n' '# User-managed file' > "$BBRV3_MANAGED_PACKAGES"
+run_installer '1\nn\n\n0\n'
+grep -Fxq '# User-managed file' "$BBRV3_MANAGED_PACKAGES"
+assert_output_contains '包记录文件不属于本项目'
+assert_log_contains 'dpkg -i '
+echo 'PASS: installation preserves an unowned package registry'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.12-xanmod1 > "$TEST_PACKAGES"
@@ -248,7 +268,7 @@ TEST_RUNNING=7.2.12-xanmod1
 run_installer '6\nn\n\n0\n'
 assert_output_contains 'xanmod1 → xanmod2'
 assert_log_contains 'dpkg -i '
-assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.12-aggressive-xanmod1'
+assert_log_not_contains 'apt-get remove'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.12-xanmod1'
 echo 'PASS: a newer aggressive XanMod revision upgrades independently'
 
@@ -269,6 +289,17 @@ assert_output_contains '已安装的 Linux 版本高于最新可用 Release'
 assert_output_contains '已取消安装'
 assert_log_not_contains 'dpkg -i '
 echo 'PASS: an older Release needs confirmation before installing over a newer Linux version'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' \
+    'https://example.test/linux-image-7.2.12-b0123456789r2a1-xanmod1_1_amd64.deb' \
+    'https://example.test/linux-headers-7.2.12-b0123456789r2a1-xanmod1_1_amd64.deb' > "$TEST_URLS"
+run_installer '1\nn\n\n0\n'
+assert_output_contains '发现相同 Linux 版本的新构建'
+assert_log_contains 'dpkg -i '
+assert_log_not_contains 'apt-get remove'
+echo 'PASS: a new same-version build installs alongside the earlier kernel'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"
@@ -297,7 +328,8 @@ echo 'PASS: version selection labels each installed Linux version and its highes
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.9-xanmod1 linux-image-7.2.12-xanmod1 > "$TEST_PACKAGES"
 run_installer '1\nn\n\n0\n'
-assert_output_contains '已是最新版本'
+assert_output_contains '已安装相同 Linux 版本和修订'
+assert_output_contains '未比较构建内容'
 assert_log_not_contains 'dpkg -i'
 echo 'PASS: installed versions are compared numerically'
 
@@ -312,14 +344,14 @@ echo 'PASS: a stable installed version sorts after its release candidate'
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1:amd64 linux-image-7.2.0-xanmod1:amd64 > "$TEST_PACKAGES"
 run_installer '1\nn\n\n0\n'
-assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.0-xanmod1:amd64'
+assert_log_not_contains 'apt-get remove'
 assert_log_not_contains 'linux-image-7.2.1-xanmod1:amd64'
 echo 'PASS: architecture-qualified running packages are retained'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.0-xanmod1 linux-image-7.1.9-aggressive-xanmod1 > "$TEST_PACKAGES"
 run_installer '1\nn\n\n0\n'
-assert_log_contains 'apt-get remove --purge -y -- linux-image-7.2.0-xanmod1'
+assert_log_not_contains 'apt-get remove'
 assert_log_not_contains 'linux-image-7.1.9-aggressive-xanmod1'
 echo 'PASS: standard upgrades do not remove the separate aggressive kernel'
 
@@ -331,7 +363,7 @@ printf '%s\n' \
     'https://example.test/linux-headers-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
 run_installer '6\nn\n\n0\n'
 assert_log_contains 'linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb'
-assert_log_contains 'apt-get remove --purge -y -- linux-image-7.1.9-aggressive-xanmod1'
+assert_log_not_contains 'apt-get remove'
 assert_output_contains 'GRUB 默认可能仍选择标准内核'
 assert_output_contains '7.2.12-aggressive-xanmod1'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
@@ -357,6 +389,10 @@ if TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_AVAILABLE=reno bash "$BBRV3_AGGRES
 fi
 assert_log_not_contains 'sysctl -p'
 TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=cubic bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
+assert_log_not_contains 'sysctl -p'
+TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=reno bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
+assert_log_not_contains 'sysctl -p'
+TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=bbr bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
 assert_log_contains "sysctl -p $BBRV3_AGGRESSIVE_CONF"
 assert_log_not_contains 'net.core.default_qdisc'
 echo 'PASS: automatic BBR applies only to the aggressive kernel without a conflicting service or algorithm'
@@ -364,7 +400,7 @@ echo 'PASS: automatic BBR applies only to the aggressive kernel without a confli
 reset_fixture
 printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
 printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
-export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=reno TEST_EXECUTE_START=1
+export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=bbr TEST_EXECUTE_START=1
 run_installer '6\nn\n\n0\n'
 assert_log_contains "sysctl -p $BBRV3_AGGRESSIVE_CONF"
 grep -Fxq 'bbr' "$TEST_DIR/algorithm"
@@ -566,6 +602,14 @@ assert_output_contains '下载失败'
 echo 'PASS: failed downloads preserve the installed kernel'
 
 reset_fixture
+printf '%s\t%s\n' 'https://example.test/linux-image-7.2.12-xanmod1_1_amd64.deb' \
+    '0000000000000000000000000000000000000000000000000000000000000000' > "$TEST_URLS"
+run_installer '1\n\n0\n'
+assert_output_contains 'SHA-256 不匹配'
+assert_log_not_contains 'dpkg -i'
+echo 'PASS: a checksum mismatch is rejected before installation'
+
+reset_fixture
 export TEST_CURL_FAIL=1
 run_installer '1\n\n0\n'
 assert_output_contains '无法查询 GitHub Release'
@@ -675,6 +719,48 @@ assert_log_not_contains "rm -f $BBRV3_SYSCTL_CONF"
 echo 'PASS: aggressive uninstall preserves the standard kernel and shared configuration'
 
 reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+printf '%s\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_ecn=2' > "$BBRV3_SYSCTL_CONF"
+run_installer '8\ny\n\n0\n'
+grep -Fxq 'net.ipv4.tcp_ecn=2' "$BBRV3_SYSCTL_CONF"
+assert_output_contains '无法确认来源'
+assert_output_contains '保留共享网络配置'
+echo 'PASS: uninstall with no other profile keeps the existing shared network file'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 linux-headers-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+mkdir -p "$TEST_DIR/registry"
+printf '%s\n' '# Managed by Actions-bbr-v3 package registry' \
+    $'aggressive\tlinux-image-7.2.12-aggressive-xanmod1' \
+    $'aggressive\tlinux-headers-7.2.12-aggressive-xanmod1' > "$BBRV3_MANAGED_PACKAGES"
+run_installer '8\ny\n\n0\n'
+assert_log_contains 'apt-get remove --purge -y -- linux-headers-7.2.12-aggressive-xanmod1'
+! grep -Fq 'linux-headers-7.2.12-aggressive-xanmod1' "$BBRV3_MANAGED_PACKAGES"
+echo 'PASS: uninstall removes only a recorded header for a removed non-running image'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 linux-headers-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+mkdir -p "$TEST_DIR/registry"
+printf '%s\n' '# Managed by Actions-bbr-v3 package registry' \
+    $'aggressive\tlinux-image-7.2.12-aggressive-xanmod1' \
+    $'aggressive\tlinux-headers-7.2.12-aggressive-xanmod1' > "$BBRV3_MANAGED_PACKAGES"
+export TEST_RUNNING=7.2.12-aggressive-xanmod1
+run_installer '8\ny\n\n0\n'
+assert_log_not_contains 'apt-get remove --purge -y -- linux-headers-7.2.12-aggressive-xanmod1'
+grep -Fq 'linux-headers-7.2.12-aggressive-xanmod1' "$BBRV3_MANAGED_PACKAGES"
+echo 'PASS: uninstall preserves headers for the running kernel'
+
+reset_fixture
+printf 'installed\t%s\n' linux-headers-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
+mkdir -p "$TEST_DIR/registry"
+printf '%s\n' '# Managed by Actions-bbr-v3 package registry' \
+    $'aggressive\tlinux-headers-7.2.12-aggressive-xanmod1' > "$BBRV3_MANAGED_PACKAGES"
+run_installer '8\ny\n\n0\n'
+assert_log_contains 'apt-get remove --purge -y -- linux-headers-7.2.12-aggressive-xanmod1'
+assert_output_contains '未找到激进版镜像，可清理以下已记录头文件'
+echo 'PASS: orphaned recorded headers can be cleaned after reboot'
+
+reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
 mkdir -p "$TEST_DIR/aggressive"
 for path in "$BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_UNIT"; do
@@ -773,6 +859,15 @@ assert_output_contains 'BBR 生效情况: 未作为默认算法（当前默认 s
 assert_output_not_contains 'BBR 生效情况: 激进版 BBR'
 assert_log_not_contains 'sysctl -w'
 echo 'PASS: an aggressive kernel with Skyline does not claim that BBR is the default'
+
+reset_fixture
+printf 'installed\t%s\n' linux-image-7.3.0-b0123456789r1a1-aggressive-xanmod1 linux-image-7.3.0-b0123456789r2a1-aggressive-xanmod1 > "$TEST_PACKAGES"
+export TEST_RUNNING=7.3.0-b0123456789r1a1-aggressive-xanmod1 TEST_ALGO=bbr
+run_installer '3\n\n0\n'
+assert_output_contains '当前生效内核: 激进版（依据运行内核标识）'
+assert_output_contains '已安装激进版（最高）: 7.3.0-b0123456789r2a1-aggressive-xanmod1'
+assert_output_contains '较新版本 7.3.0-b0123456789r2a1-aggressive-xanmod1'
+echo 'PASS: distinct builds are identified and ordered by Actions run number'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.3.0-xanmod1 linux-image-7.3.0-aggressive-xanmod1 > "$TEST_PACKAGES"

@@ -38,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
+      source_commit: ${{ steps.plan.outputs.source_commit }}
+      fingerprint: ${{ steps.plan.outputs.fingerprint }}
       build_standard: ${{ steps.plan.outputs.build_standard }}
       build_aggressive: ${{ steps.plan.outputs.build_aggressive }}
     steps:
@@ -46,14 +48,15 @@ jobs:
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-          FORCE_BUILD: ${{ inputs.force || false }}
+          FORCE_BUILD: ${{ inputs.force || (github.event_name != 'schedule' && inputs.publish == false) }}
         run: |
           set -euo pipefail
-          tag=''
+          tag='' source_commit=''
           for attempt in 1 2 3; do
-            tag=$(git -c 'versionsort.suffix=-rc' ls-remote \
+            ref=$(git -c 'versionsort.suffix=-rc' ls-remote \
               --tags --refs --sort=-version:refname https://gitlab.com/xanmod/linux.git '*-xanmod*' \
-              | awk 'NR == 1 { sub("^refs/tags/", "", $2); tag=$2 } END { print tag }') || true
+              | awk 'NR == 1 { sub("^refs/tags/", "", $2); print $1, $2 }') || true
+            read -r source_commit tag <<< "$ref"
             [[ -n "$tag" ]] && break
             echo "上游查询失败，重试 $attempt/3" >&2
             sleep 5
@@ -62,6 +65,12 @@ jobs:
             echo "::error::无法取得受支持的 XanMod 标签: $tag"
             exit 1
           fi
+          # Annotated tags resolve to their peeled commit; lightweight tags already
+          # point at the commit. Both jobs later verify the exact checked-out SHA.
+          peeled=$(git ls-remote --tags https://gitlab.com/xanmod/linux.git "refs/tags/$tag^{}" | awk '{print $1}')
+          [[ -z "$peeled" ]] || source_commit=$peeled
+          [[ "$source_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "::error::无法解析上游提交"; exit 1; }
+          fingerprint=$(python3 scripts/build_provenance.py fingerprint "$tag" "$source_commit")
           version=${tag%-xanmod*}
           fetch_release() {
             local release_tag=$1 path=$2 status
@@ -82,6 +91,7 @@ jobs:
           [[ "$FORCE_BUILD" == true ]] && args+=(--force)
           python3 scripts/plan-pair-build.py "$tag" \
             "$RUNNER_TEMP/standard-release.json" "$RUNNER_TEMP/aggressive-release.json" \
+            --source-commit "$source_commit" --fingerprint "$fingerprint" \
             "${args[@]}" | tee -a "$GITHUB_OUTPUT"
 
   standard:
@@ -91,6 +101,8 @@ jobs:
     with:
       profile: standard
       xanmod_tag: ${{ needs.discover.outputs.tag }}
+      source_commit: ${{ needs.discover.outputs.source_commit }}
+      fingerprint: ${{ needs.discover.outputs.fingerprint }}
       publish: ${{ github.event_name == 'schedule' || inputs.publish == true }}
 
   aggressive:
@@ -100,4 +112,6 @@ jobs:
     with:
       profile: aggressive
       xanmod_tag: ${{ needs.discover.outputs.tag }}
+      source_commit: ${{ needs.discover.outputs.source_commit }}
+      fingerprint: ${{ needs.discover.outputs.fingerprint }}
       publish: ${{ github.event_name == 'schedule' || inputs.publish == true }}
