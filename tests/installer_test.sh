@@ -439,165 +439,23 @@ assert_output_contains '7.2.12-aggressive-xanmod1'
 assert_log_not_contains 'apt-get remove --purge -y -- linux-image-7.2.1-xanmod1'
 assert_log_not_contains 'sysctl -w'
 assert_log_not_contains 'tee '
-grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
-assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
-assert_log_contains 'systemctl start xanmod-aggressive-bbr.service'
-assert_output_contains '仅激进内核运行且无其他拥塞控制冲突时生效'
+[[ ! -e "$BBRV3_AGGRESSIVE_CONF" && ! -e "$BBRV3_AGGRESSIVE_UNIT" && ! -e "$BBRV3_AGGRESSIVE_HELPER" ]]
 echo 'PASS: aggressive upgrades select their own release and preserve the standard kernel'
 
-# Run the installed boot helper against independent kernel and service states.
-: > "$TEST_LOG"
-TEST_RUNNING=7.2.1-xanmod1 bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
+reset_fixture
+mkdir -p "$(dirname "$BBRV3_AGGRESSIVE_CONF")"
+for path in "$BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_LEGACY_CONF" "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_UNIT"; do
+    printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' > "$path"
+done
+printf '%s\n' 'net.ipv4.tcp_ecn=2' > "$BBRV3_SYSCTL_CONF"
+run_installer '1\nn\n\n0\n'
+for path in "$BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_LEGACY_CONF" "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_UNIT"; do
+    [[ ! -e "$path" ]]
+done
+assert_log_contains 'systemctl disable --now xanmod-aggressive-bbr.service'
 assert_log_not_contains 'sysctl -p'
-TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_SKYLINE_ACTIVE=1 bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
-assert_log_not_contains 'sysctl -p'
-TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=custom_cc bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
-assert_log_not_contains 'sysctl -p'
-if TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_AVAILABLE=reno bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"; then
-    echo 'Expected automatic activation to fail when BBR is unavailable' >&2
-    exit 1
-fi
-assert_log_not_contains 'sysctl -p'
-TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=cubic bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
-assert_log_not_contains 'sysctl -p'
-TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=reno bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
-assert_log_not_contains 'sysctl -p'
-TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=bbr bash "$BBRV3_AGGRESSIVE_HELPER" "$BBRV3_AGGRESSIVE_CONF"
-assert_log_contains "sysctl -p $BBRV3_AGGRESSIVE_CONF"
-assert_log_not_contains 'net.core.default_qdisc'
-echo 'PASS: automatic BBR applies only to the aggressive kernel without a conflicting service or algorithm'
-
-reset_fixture
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
-export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=bbr TEST_EXECUTE_START=1
-run_installer '6\nn\n\n0\n'
-assert_log_contains "sysctl -p $BBRV3_AGGRESSIVE_CONF"
-grep -Fxq 'bbr' "$TEST_DIR/algorithm"
-assert_output_contains '当前默认拥塞控制:'
-echo 'PASS: installing on the running aggressive kernel immediately applies BBR'
-
-reset_fixture
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
-export TEST_RUNNING=7.3.0-aggressive-xanmod1 TEST_ALGO=skyline_cc TEST_SKYLINE_ACTIVE=1 TEST_EXECUTE_START=1
-run_installer '6\nn\n\n0\n'
-[[ -f "$BBRV3_AGGRESSIVE_CONF" ]] || { echo 'Expected a saved aggressive configuration' >&2; exit 1; }
-assert_log_not_contains 'sysctl -p'
-assert_output_contains '检测到 Skyline 正在运行，已保留其拥塞控制'
-echo 'PASS: installation saves the profile but reports and preserves an active Skyline service'
-
-reset_fixture
-printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-run_installer '6\nn\n\n0\n'
-assert_output_contains '无法确认 XanMod 修订是否相同'
-assert_log_not_contains 'dpkg -i'
-grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
-assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
-echo 'PASS: an existing aggressive installation gains the automatic configuration without reinstalling'
-
-reset_fixture
-printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-mkdir -p "$TEST_DIR/aggressive"
-printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' 'net.ipv4.tcp_congestion_control=bbr' '# User note' > "$BBRV3_AGGRESSIVE_CONF"
-run_installer '6\nn\n\n0\n'
-grep -Fxq '# User note' "$BBRV3_AGGRESSIVE_CONF"
-assert_log_contains 'systemctl enable xanmod-aggressive-bbr.service'
-echo 'PASS: updating the automatic service preserves an existing managed configuration'
-
-reset_fixture
-printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-mkdir -p "$TEST_DIR/aggressive"
-printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' 'net.ipv4.tcp_congestion_control=bbr' '# Custom note' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
-run_installer '6\nn\n\n0\n'
-assert_output_contains '已将旧版激进 BBR 配置迁移至'
-grep -Fxq '# Custom note' "$BBRV3_AGGRESSIVE_CONF"
-grep -Fxq "ExecStart=/bin/bash $BBRV3_AGGRESSIVE_HELPER $BBRV3_AGGRESSIVE_CONF" "$BBRV3_AGGRESSIVE_UNIT"
-[[ ! -e "$BBRV3_AGGRESSIVE_LEGACY_CONF" ]] || { echo 'Expected the identical old configuration to be removed after migration' >&2; exit 1; }
-echo 'PASS: managed legacy settings migrate without losing edits and the service uses the new path'
-
-reset_fixture
-printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-mkdir -p "$TEST_DIR/aggressive"
-printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' '# Old user setting' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
-printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' '# New user setting' > "$BBRV3_AGGRESSIVE_CONF"
-run_installer '6\nn\n\n0\n'
-assert_output_contains '新旧配置内容不同，已保留旧配置供检查'
-grep -Fxq '# Old user setting' "$BBRV3_AGGRESSIVE_LEGACY_CONF"
-grep -Fxq '# New user setting' "$BBRV3_AGGRESSIVE_CONF"
-echo 'PASS: different managed old and new configurations are both preserved'
-
-reset_fixture
-printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-mkdir -p "$TEST_DIR/aggressive"
-printf '%s\n' '# User owned legacy configuration' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
-run_installer '6\nn\n\n0\n'
-assert_output_contains '旧配置不属于本项目或是符号链接，将保留'
-grep -Fxq '# User owned legacy configuration' "$BBRV3_AGGRESSIVE_LEGACY_CONF"
-grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
-echo 'PASS: an unmanaged legacy configuration is not copied or removed'
-
-reset_fixture
-printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-mkdir -p "$TEST_DIR/aggressive"
-printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' '# Symlink target' > "$TEST_DIR/other-config"
-ln -s "$TEST_DIR/other-config" "$BBRV3_AGGRESSIVE_LEGACY_CONF"
-run_installer '6\nn\n\n0\n'
-assert_output_contains '旧配置不属于本项目或是符号链接，将保留'
-[[ -L "$BBRV3_AGGRESSIVE_LEGACY_CONF" ]] || { echo 'Removed a user symlink' >&2; exit 1; }
-grep -Fxq '# Symlink target' "$TEST_DIR/other-config"
-grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$BBRV3_AGGRESSIVE_CONF"
-echo 'PASS: a legacy symlink and its target are not copied or removed'
-
-reset_fixture
-printf 'installed\t%s\n' linux-image-7.2.12-aggressive-xanmod1 > "$TEST_PACKAGES"
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-mkdir -p "$TEST_DIR/aggressive"
-printf '%s\n' '# Managed by Actions-bbr-v3 aggressive profile' '# Old settings' > "$BBRV3_AGGRESSIVE_LEGACY_CONF"
-export TEST_SYSTEMCTL_FAIL=enable
-run_installer '6\nn\n\n0\n'
-assert_output_contains '激进版已安装，但自动 BBR 配置未完成'
-grep -Fxq '# Old settings' "$BBRV3_AGGRESSIVE_LEGACY_CONF"
-grep -Fxq '# Old settings' "$BBRV3_AGGRESSIVE_CONF"
-echo 'PASS: migration preserves the old configuration if service activation fails'
-
-reset_fixture
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
-mkdir -p "$TEST_DIR/aggressive"
-printf '%s\n' '# User owned configuration' > "$BBRV3_AGGRESSIVE_CONF"
-run_installer '6\nn\n\n0\n'
-assert_output_contains '配置文件已存在且不属于本项目'
-assert_output_contains '内核已安装，但自动 BBR 配置未完成'
-grep -Fxq '# User owned configuration' "$BBRV3_AGGRESSIVE_CONF"
-assert_log_not_contains 'systemctl enable'
-echo 'PASS: automatic configuration does not overwrite an unmanaged file'
-
-reset_fixture
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
-mkdir -p "$TEST_DIR/aggressive"
-ln -s "$TEST_DIR/elsewhere" "$BBRV3_AGGRESSIVE_CONF"
-run_installer '6\nn\n\n0\n'
-assert_output_contains '配置路径是符号链接，未覆盖'
-[[ ! -e "$TEST_DIR/elsewhere" ]] || { echo 'Followed an unmanaged symlink' >&2; exit 1; }
-assert_log_not_contains 'systemctl enable'
-echo 'PASS: automatic configuration refuses symlink targets'
-
-reset_fixture
-printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
-printf '%s\n' 'https://example.test/linux-image-7.2.12-aggressive-xanmod1_1_amd64.deb' > "$TEST_URLS"
-export TEST_SYSTEMCTL_FAIL=enable
-run_installer '6\nn\n\n0\n'
-assert_output_contains '内核已安装，但自动 BBR 配置未完成'
-assert_log_contains 'dpkg -i '
-echo 'PASS: failed service activation is reported without hiding successful kernel installation'
+grep -Fxq 'net.ipv4.tcp_ecn=2' "$BBRV3_SYSCTL_CONF"
+echo 'PASS: standard installation cleans up the retired project configuration'
 
 reset_fixture
 printf '%s\n' aggressive-x86_64-7.2.12 > "$TEST_TAGS"
@@ -700,19 +558,18 @@ reset_fixture
 export TEST_ALGO=cubic
 run_installer '5\n\n0\n'
 assert_log_contains 'sysctl -w net.ipv4.tcp_congestion_control=bbr'
-assert_log_contains "tee $BBRV3_SYSCTL_CONF"
+assert_log_not_contains "tee "
 assert_log_not_contains 'sysctl -w net.core.default_qdisc'
-grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$TEST_DIR/tee-content"
-assert_output_contains '已启用 BBR 并保存配置'
-echo 'PASS: manual BBR selection changes only the congestion algorithm and persists it'
+[[ ! -e "$BBRV3_SYSCTL_CONF" ]]
+assert_output_contains "已临时启用 BBR"
+echo 'PASS: manual BBR selection changes only the runtime congestion algorithm'
 
 reset_fixture
 printf '%s\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control = cubic' 'net.ipv4.tcp_ecn=0' > "$BBRV3_SYSCTL_CONF"
 export TEST_ALGO=cubic
 run_installer '5\n\n0\n'
-grep -Fxq 'net.core.default_qdisc=fq' "$TEST_DIR/tee-content"
-grep -Fxq 'net.ipv4.tcp_congestion_control=bbr' "$TEST_DIR/tee-content"
-grep -Fxq 'net.ipv4.tcp_ecn=0' "$TEST_DIR/tee-content"
+assert_log_not_contains "tee "
+grep -Fxq "net.ipv4.tcp_congestion_control = cubic" "$BBRV3_SYSCTL_CONF"
 echo 'PASS: existing unrelated settings survive manual BBR configuration'
 
 reset_fixture
@@ -746,13 +603,6 @@ assert_log_contains 'sysctl -w net.ipv4.tcp_congestion_control=bbr'
 assert_log_not_contains 'tee '
 assert_output_contains '拥塞控制已被其他设置覆盖'
 echo 'PASS: an immediate conflicting override is not saved persistently'
-
-reset_fixture
-export TEST_ALGO=cubic TEST_TEE_FAIL=1
-run_installer '5\n\n0\n'
-assert_log_contains 'sysctl -w net.ipv4.tcp_congestion_control=bbr'
-assert_output_contains '无法保存 BBR 配置'
-echo 'PASS: a manual BBR persistence failure is reported'
 
 reset_fixture
 printf 'installed\t%s\n' linux-image-7.2.1-xanmod1 > "$TEST_PACKAGES"

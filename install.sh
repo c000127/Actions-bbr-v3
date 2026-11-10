@@ -420,124 +420,7 @@ get_release_assets() {
     fi
 }
 
-configure_aggressive_bbr() {
-    local target current_algo current_qdisc running_kernel legacy_managed=0 config_source
-    # Do not replace files that another administrator or program owns.
-    for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
-        if "${SUDO[@]}" test -L "$target"; then
-            echo -e "${UI_RED}配置路径是符号链接，未覆盖: $target${UI_RESET}" >&2
-            return 1
-        fi
-        if "${SUDO[@]}" test -e "$target" && ! "${SUDO[@]}" grep -Fxq "$AGGRESSIVE_MARKER" "$target"; then
-            echo -e "${UI_RED}配置文件已存在且不属于本项目，未覆盖: $target${UI_RESET}" >&2
-            return 1
-        fi
-    done
-    if [[ "$AGGRESSIVE_CONF$AGGRESSIVE_HELPER" =~ [[:space:]\"\'] ]]; then
-        echo -e "${UI_RED}配置路径含不支持的空白或引号${UI_RESET}" >&2
-        return 1
-    fi
-    if [[ "$AGGRESSIVE_LEGACY_CONF" != "$AGGRESSIVE_CONF" ]] && \
-       "${SUDO[@]}" test -e "$AGGRESSIVE_LEGACY_CONF"; then
-        if ! "${SUDO[@]}" test -L "$AGGRESSIVE_LEGACY_CONF" && \
-           "${SUDO[@]}" test -f "$AGGRESSIVE_LEGACY_CONF" && \
-           "${SUDO[@]}" grep -Fxq "$AGGRESSIVE_MARKER" "$AGGRESSIVE_LEGACY_CONF"; then
-            legacy_managed=1
-        else
-            echo -e "${UI_YELLOW}旧配置不属于本项目或是符号链接，将保留: $AGGRESSIVE_LEGACY_CONF${UI_RESET}" >&2
-        fi
-    fi
-
-    cat > "$DOWNLOAD_DIR/aggressive.conf" <<'EOF'
-# Managed by Actions-bbr-v3 aggressive profile
-# Only applied when an aggressive XanMod kernel is running and no other
-# congestion-control service or custom algorithm is active.
-net.ipv4.tcp_congestion_control=bbr
-EOF
-    cat > "$DOWNLOAD_DIR/aggressive-helper" <<'EOF'
-#!/bin/bash
-# Managed by Actions-bbr-v3 aggressive profile
-set -eu
-config=${1:?missing configuration file}
-kernel=$(uname -r)
-[[ "$kernel" =~ -aggressive-xanmod[0-9]+$ ]] || exit 0
-if systemctl is-active --quiet skyline-speederd.service || \
-   systemctl is-active --quiet skyline-speeder-enable.service; then
-    echo 'Skyline is active; leaving congestion control unchanged.'
-    exit 0
-fi
-current=$(sysctl -n net.ipv4.tcp_congestion_control)
-case "$current" in
-    bbr) ;;
-    *) echo "Congestion control $current may be managed elsewhere; leaving it unchanged."; exit 0 ;;
-esac
-available=$(sysctl -n net.ipv4.tcp_available_congestion_control)
-if [[ " $available " != *" bbr "* ]]; then
-    echo 'BBR is unavailable; leaving congestion control unchanged.' >&2
-    exit 1
-fi
-sysctl -p "$config"
-EOF
-    cat > "$DOWNLOAD_DIR/aggressive-unit" <<EOF
-# Managed by Actions-bbr-v3 aggressive profile
-[Unit]
-Description=Apply BBR settings only on the aggressive XanMod kernel
-After=systemd-sysctl.service skyline-speederd.service skyline-speeder-enable.service
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash $AGGRESSIVE_HELPER $AGGRESSIVE_CONF
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    if ! "${SUDO[@]}" test -e "$AGGRESSIVE_CONF"; then
-        config_source="$DOWNLOAD_DIR/aggressive.conf"
-        [[ "$legacy_managed" -eq 1 ]] && config_source="$AGGRESSIVE_LEGACY_CONF"
-        if ! "${SUDO[@]}" install -D -m 0644 "$config_source" "$AGGRESSIVE_CONF"; then
-            echo -e "${UI_RED}无法保存激进版 BBR 配置，旧配置将保留${UI_RESET}" >&2
-            return 1
-        fi
-    fi
-    if ! "${SUDO[@]}" install -D -m 0755 "$DOWNLOAD_DIR/aggressive-helper" "$AGGRESSIVE_HELPER" || \
-       ! "${SUDO[@]}" install -D -m 0644 "$DOWNLOAD_DIR/aggressive-unit" "$AGGRESSIVE_UNIT" || \
-       ! "${SUDO[@]}" systemctl daemon-reload || \
-       ! "${SUDO[@]}" systemctl enable "${AGGRESSIVE_UNIT##*/}" || \
-       ! "${SUDO[@]}" systemctl start "${AGGRESSIVE_UNIT##*/}"; then
-        echo -e "${UI_RED}激进版自动 BBR 配置未能启用${UI_RESET}" >&2
-        return 1
-    fi
-    if [[ "$legacy_managed" -eq 1 ]]; then
-        if "${SUDO[@]}" cmp -s -- "$AGGRESSIVE_LEGACY_CONF" "$AGGRESSIVE_CONF"; then
-            if "${SUDO[@]}" rm -f -- "$AGGRESSIVE_LEGACY_CONF"; then
-                echo -e "${UI_CYAN}  已将旧版激进 BBR 配置迁移至 $AGGRESSIVE_CONF${UI_RESET}"
-            else
-                echo -e "${UI_YELLOW}  新配置已保存，旧配置无法删除，请手动检查: $AGGRESSIVE_LEGACY_CONF${UI_RESET}" >&2
-            fi
-        else
-            echo -e "${UI_YELLOW}  新旧配置内容不同，已保留旧配置供检查: $AGGRESSIVE_LEGACY_CONF${UI_RESET}" >&2
-        fi
-    fi
-    current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
-    current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
-    running_kernel=$(uname -r 2>/dev/null || true)
-    echo -e "${UI_CYAN}  激进版 BBR 配置: $AGGRESSIVE_CONF${UI_RESET}"
-    echo -e "${UI_CYAN}  .profile 由激进版服务按条件加载，不会被 sysctl --system 无条件应用。${UI_RESET}"
-    echo -e "${UI_CYAN}  仅激进内核运行且无其他拥塞控制冲突时生效；当前默认算法: ${current_algo:-未知}，默认队列: ${current_qdisc:-未知}${UI_RESET}"
-    if systemctl is-active --quiet skyline-speederd.service || \
-       systemctl is-active --quiet skyline-speeder-enable.service; then
-        echo -e "${UI_YELLOW}  检测到 Skyline 正在运行，已保留其拥塞控制${UI_RESET}"
-    elif [[ -n "$current_algo" && "$current_algo" != bbr ]]; then
-        echo -e "${UI_YELLOW}  检测到其他拥塞算法 $current_algo，已保留现有设置；如确认没有其他服务管理，可在菜单中手动启用 BBR${UI_RESET}"
-    elif [[ ! "$running_kernel" =~ -aggressive-xanmod[0-9]+$ ]]; then
-        echo -e "${UI_CYAN}  配置将在启动激进内核后重新检查${UI_RESET}"
-    elif [[ "$current_algo" != bbr ]]; then
-        echo -e "${UI_YELLOW}  当前算法不是 BBR，请检查服务日志及其他网络配置${UI_RESET}"
-    fi
-    return 0
-}
-
-remove_aggressive_bbr_config() {
+remove_legacy_bbr_config() {
     local target removed_unit=0
     for target in "$AGGRESSIVE_CONF" "$AGGRESSIVE_HELPER" "$AGGRESSIVE_UNIT"; do
         if "${SUDO[@]}" test -L "$target" || \
@@ -651,14 +534,14 @@ download_and_install() {
     local current_algo current_qdisc installed_kernel="${image_pkgs[0]#linux-image-}"
     installed_kernel="${installed_kernel#unsigned-}"
     echo -e "${UI_CYAN}  新内核: ${UI_BOLD_GREEN}$installed_kernel（$(profile_label "$profile")）${UI_RESET}"
+    if ! remove_legacy_bbr_config; then
+        echo "旧版 BBR 配置清理未完成，请手动检查。" >&2
+    fi
     if [[ "$profile" == "aggressive" ]]; then
-        if ! configure_aggressive_bbr; then
-            echo -e "${UI_YELLOW}  内核已安装，但自动 BBR 配置未完成；请检查上方错误${UI_RESET}"
-        fi
         echo -e "${UI_YELLOW}  ⚠ 请确认 GRUB 选择的是 $installed_kernel；必要时在高级选项中选择${UI_RESET}"
         echo -e "${UI_YELLOW}    VPS 无交互启动方法请参阅 README；启动后请检查一次性启动项是否清除${UI_RESET}"
     else
-        echo -e "${UI_CYAN}  安装未修改网络配置；可在菜单中手动启用 BBR${UI_RESET}"
+        echo -e "${UI_CYAN}  可在菜单中临时启用 BBR${UI_RESET}"
         echo -e "${UI_YELLOW}  ⚠ 使用该内核需要重启；安装旧版时请确认 GRUB 选择的版本${UI_RESET}"
     fi
     current_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
@@ -680,7 +563,7 @@ download_and_install() {
 # ── 菜单操作 ──────────────────────────────────────────────
 
 do_enable_bbr() {
-    local current_algo available config_tmp="$DOWNLOAD_DIR/bbr-sysctl.conf"
+    local current_algo available
 
     # Skyline 会在后台选择自己的拥塞算法；即使当前暂时为 BBR，也不能覆盖它。
     if command -v systemctl >/dev/null 2>&1 && \
@@ -708,37 +591,15 @@ do_enable_bbr() {
         return 1
     fi
 
-    # 更新项目配置时保留文件中已有的其他设置。
-    if [[ -f "$SYSCTL_CONF" ]]; then
-        if ! awk '
-            /^[[:space:]]*net[.]ipv4[.]tcp_congestion_control[[:space:]]*=/ {
-                if (!written) print "net.ipv4.tcp_congestion_control=bbr"
-                written = 1
-                next
-            }
-            { print }
-            END { if (!written) print "net.ipv4.tcp_congestion_control=bbr" }
-        ' "$SYSCTL_CONF" > "$config_tmp"; then
-            echo -e "${UI_RED}无法读取现有 BBR 配置，未修改拥塞控制${UI_RESET}"
-            return 1
-        fi
-    else
-        printf '%s\n' 'net.ipv4.tcp_congestion_control=bbr' > "$config_tmp" || return 1
-    fi
-
     if ! "${SUDO[@]}" sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
-        echo -e "${UI_RED}无法启用 BBR，未写入持久配置${UI_RESET}"
+        echo -e "${UI_RED}无法启用 BBR${UI_RESET}"
         return 1
     fi
     if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)" != "bbr" ]]; then
-        echo -e "${UI_YELLOW}拥塞控制已被其他设置覆盖，未写入持久配置${UI_RESET}"
+        echo -e "${UI_YELLOW}拥塞控制已被其他设置覆盖${UI_RESET}"
         return 1
     fi
-    if ! "${SUDO[@]}" tee "$SYSCTL_CONF" < "$config_tmp" >/dev/null; then
-        echo -e "${UI_YELLOW}无法保存 BBR 配置，重启后可能需要手动配置${UI_RESET}"
-        return 1
-    fi
-    echo -e "${UI_BOLD_GREEN}已启用 BBR 并保存配置；队列和其他网络设置未更改${UI_RESET}"
+    echo "已临时启用 BBR，重启后由系统配置决定。"
     echo "  BBR 作为默认拥塞控制用于新连接；已有连接可能继续使用原算法。"
 }
 
@@ -791,13 +652,9 @@ do_install_latest() {
         else
             echo -e "${UI_YELLOW}已安装相同 Linux 版本，但无法确认 XanMod 修订是否相同。${UI_RESET}"
         fi
-        [[ "$profile" == aggressive ]] && echo -e "${UI_CYAN}跳过安装时仍会检查激进版自动 BBR 配置。${UI_RESET}"
         echo -n -e "${UI_CYAN}仍要安装此 Release？(y/N): ${UI_RESET}"
         read -r ans || return 0
         if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
-            if [[ "$profile" == "aggressive" ]] && ! configure_aggressive_bbr; then
-                echo -e "${UI_YELLOW}激进版已安装，但自动 BBR 配置未完成${UI_RESET}"
-            fi
             return 0
         fi
     elif [[ -n "$installed" && "$(version_sort_key "$installed")" > "$(version_sort_key "$version")" ]]; then
@@ -994,7 +851,7 @@ do_uninstall() {
     else
         echo -e "${UI_YELLOW}请先确认系统有其他可启动内核。${UI_RESET}"
     fi
-    [[ "$profile" == aggressive ]] && echo "  将尝试移除本项目管理的激进版自动 BBR 配置。"
+    echo "  将尝试清理旧版安装器管理的 BBR 配置和服务。"
     echo "  保留共享网络配置 $SYSCTL_CONF 及其中的其他设置。"
     echo -n -e "${UI_CYAN}确认卸载？(y/N): ${UI_RESET}"
     read -r ans || { echo ""; echo "已取消卸载。"; return 0; }
@@ -1017,7 +874,7 @@ do_uninstall() {
     if ! forget_managed_packages "${removed[@]}"; then
         echo -e "${UI_YELLOW}无法更新本项目包记录，请手动检查 $MANAGED_PACKAGES${UI_RESET}"
     fi
-    if [[ "$profile" == "aggressive" ]] && ! remove_aggressive_bbr_config; then
+    if ! remove_legacy_bbr_config; then
         echo -e "${UI_YELLOW}激进版配置清理不完整，请手动检查${UI_RESET}"
     fi
     if [[ ${#pkgs[@]} -gt 0 ]] && ! refresh_grub remove "${pkgs[@]}"; then
@@ -1066,7 +923,7 @@ while true; do
     echo -e "  ${UI_YELLOW}2.${UI_RESET} 手动选择标准版版本"
     echo -e "  ${UI_YELLOW}3.${UI_RESET} 查看内核与 BBR 状态"
     echo -e "  ${UI_YELLOW}4.${UI_RESET} 卸载标准版内核"
-    echo -e "  ${UI_YELLOW}5.${UI_RESET} 手动启用 BBR（保存配置）"
+    echo -e "  ${UI_YELLOW}5.${UI_RESET} 临时启用 BBR"
     echo -e "  ${UI_YELLOW}6.${UI_RESET} 安装/更新激进版（实验性）"
     echo -e "  ${UI_YELLOW}7.${UI_RESET} 选择激进版版本安装"
     echo -e "  ${UI_YELLOW}8.${UI_RESET} 卸载激进版内核"

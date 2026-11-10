@@ -69,7 +69,7 @@ GitHub Actions 的“检查上游并构建两个 BBRv3 内核”每 6 小时检�
 
 - 菜单 **6** 安装或更新激进版，菜单 **7** 选择激进版版本，菜单 **8** 卸载激进版。
 - 菜单 **1、2、4** 仍管理标准版，菜单 **3** 查看两种内核状态；升级时保留已有内核作为回退。
-- 安装会创建激进版专用 BBR 配置及启动服务；如果 Skyline 等服务正在管理拥塞算法，会保留现有设置。
+- 两种内核的安装都不创建 sysctl 配置或 BBR 启动服务。
 - 安装后请确认 GRUB 默认项是否指向所需内核，必要时在高级选项选择激进版；重启后用 `uname -r` 确认。
 - 可通过 GRUB 的高级选项选择标准版作为回退。
 
@@ -78,23 +78,8 @@ GitHub Actions 的“检查上游并构建两个 BBRv3 内核”每 6 小时检�
 旧 `dev` 分支的提交历史已合并到主线；其中基于 mainline、x86-64-v3 和 CachyOS 补丁的早期 Beta 实验
 没有替换当前的 XanMod 双配置构建，可从历史提交 `81a7cf4` 查看。
 
-激进版使用 `/etc/sysctl.d/99-xanmod-aggressive.profile` 保存 `net.ipv4.tcp_congestion_control=bbr`：
-
-```bash
-cd /etc/sysctl.d
-cat 99-xanmod-aggressive.profile
-```
-
-它是 sysctl 格式的配置文件，但使用 `.profile` 后缀，避免系统启动和 `sysctl --system` 将其无条件应用到所有内核。
-`xanmod-aggressive-bbr.service` 在安装后和每次启动时负责按条件加载：
-仅在正在运行激进版内核、没有运行 Skyline、且当前默认算法已是 `bbr` 时应用该文件。
-当前为 `cubic`、`reno` 或其他算法时也会保留，因为无法确认是否由其他服务管理。标准内核不会被这个服务改写。
-确认不存在其他服务冲突后，可使用菜单 **5** 手动切换并持久保存 BBR。
-检测到冲突时服务会跳过；冲突解除后可运行 `sudo systemctl start xanmod-aggressive-bbr.service` 重新检查。
-这是一次性服务，执行结束后显示 `inactive` 属正常现象；可用 `journalctl -u xanmod-aggressive-bbr.service` 查看结果。
-已有旧版配置 `/etc/xanmod-bbr/aggressive.conf` 时，选择菜单 **6** 并完成配置检查即可迁移；原有设置会保留。
-如果新旧配置不同，旧文件会保留供用户检查。
-卸载激进版时仅移除本项目管理的激进版配置和服务；共享的 `/etc/sysctl.d/99-xanmod.conf` 始终保留。
+成功安装、升级或卸载任一版本时，安装器会清理旧版带项目标记的 /etc/sysctl.d/99-xanmod-aggressive.profile、/etc/xanmod-bbr/aggressive.conf、辅助脚本和启动服务。
+共享的 /etc/sysctl.d/99-xanmod.conf 可能包含用户设置，安装器会保留。清理时不会重新加载 sysctl。
 
 内核已内置 BBRv3 并将 `fq` 设为默认队列，无需再套用大份 sysctl 参数表才能使用激进算法；
 安装器不会强制覆盖现有队列或修改现有网卡 qdisc。其他服务或系统配置可能覆盖默认值，
@@ -143,11 +128,8 @@ sudo grub-editenv - list
 该检查只确认菜单中的镜像引用，不改变默认项设置，也不能证明默认项选择正确或内核可以启动。
 更新菜单可能改变按编号选择的默认项所指向的内核。重启前请核对 GRUB 设置和菜单；重启后用 `uname -r` 确认实际运行版本。
 
-标准版安装过程不会新建网络配置文件或修改当前网络参数。需要切换到 BBR 时，可在首页选择“手动启用 BBR”，
-该选项只修改拥塞算法并保存设置，不更改队列或其他网络参数。检测到正在运行的 Skyline Speeder 服务，
-或当前正在使用其他非默认拥塞算法时，脚本会保留现有设置。内核本身的默认值和其他系统服务仍可能影响重启后的实际状态；
-可通过菜单的状态检查，或运行 `sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc` 查看。
-以前版本留下的 sysctl 配置不会在安装时自动删除，需结合现有服务自行检查。
+菜单 **5** 可以临时启用 BBR。它只修改当前默认拥塞算法，重启后的算法由内核默认值和系统配置决定。
+检测到 Skyline Speeder 或其他自定义算法时，脚本会保留当前设置。
 
 ## 开发与测试
 
