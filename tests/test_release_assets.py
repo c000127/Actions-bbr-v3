@@ -9,7 +9,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = (ROOT / "install.sh").read_text(encoding="utf-8")
-SELECTOR = SCRIPT[SCRIPT.index("get_release_assets() {"):SCRIPT.index("\nconfigure_aggressive_bbr() {")]
+SELECTOR_START = SCRIPT.index("get_release_assets() {")
+SELECTOR_END = SCRIPT.index("\n}\n", SELECTOR_START) + len("\n}\n")
+SELECTOR = SCRIPT[SELECTOR_START:SELECTOR_END]
 TAG = "x86_64-7.3.0"
 
 
